@@ -1,0 +1,19 @@
+node_modules/
+dist/
+*.vsix
+.vscode-test/
+.DS_Store
+*.log
+
+# Large binaries
+claude.exe
+*.exe
+
+# Serena cache
+.serena/
+
+# MCP local config (may contain secrets)
+.mcp.json
+
+# Snyk Security Extension - AI Rules (auto-generated)
+.github/instructions/snyk_rules.instructions.md

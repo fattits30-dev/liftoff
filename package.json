@@ -1,0 +1,141 @@
+{
+  "name": "liftoff",
+  "displayName": "Liftoff - Agent Manager",
+  "description": "Multi-agent orchestration for Claude Code with browser automation - Sheffield's answer to Antigravity",
+  "version": "0.1.0",
+  "publisher": "jamie",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": ["Other"],
+  "activationEvents": ["onStartupFinished"],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "liftoff.openManager",
+        "title": "Liftoff: Open Panel (Full Tab)"
+      },
+      {
+        "command": "liftoff.openSidebar",
+        "title": "Liftoff: Open Sidebar"
+      },
+      {
+        "command": "liftoff.spawnAgent",
+        "title": "Liftoff: Spawn New Agent"
+      },
+      {
+        "command": "liftoff.killAllAgents",
+        "title": "Liftoff: Stop All Agents"
+      },
+      {
+        "command": "liftoff.continueAgent",
+        "title": "Liftoff: Continue Agent Conversation"
+      },
+      {
+        "command": "liftoff.viewHistory",
+        "title": "Liftoff: View Session History"
+      },
+      {
+        "command": "liftoff.showOutput",
+        "title": "Liftoff: Show Output Panel"
+      },
+      {
+        "command": "liftoff.setApiKey",
+        "title": "Liftoff: Set HuggingFace API Key"
+      },
+      {
+        "command": "liftoff.initMcp",
+        "title": "Liftoff: Initialize MCP Config"
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "liftoff",
+          "title": "Liftoff",
+          "icon": "resources/rocket.svg"
+        }
+      ]
+    },
+    "views": {
+      "liftoff": [
+        {
+          "type": "webview",
+          "id": "liftoff.managerView",
+          "name": "Agent Manager"
+        },
+        {
+          "type": "webview",
+          "id": "liftoff.artifactView",
+          "name": "Artifacts"
+        }
+      ]
+    },
+    "menus": {
+      "commandPalette": [
+        { "command": "liftoff.openManager" },
+        { "command": "liftoff.openSidebar" },
+        { "command": "liftoff.spawnAgent" },
+        { "command": "liftoff.killAllAgents" },
+        { "command": "liftoff.continueAgent" },
+        { "command": "liftoff.viewHistory" },
+        { "command": "liftoff.setApiKey" }
+      ]
+    },
+    "configuration": {
+      "title": "Liftoff",
+      "properties": {
+        "liftoff.huggingfaceApiKey": {
+          "type": "string",
+          "default": "",
+          "description": "Your HuggingFace API key (Pro recommended for best models)"
+        },
+        "liftoff.defaultModel": {
+          "type": "string",
+          "default": "deepseek-ai/DeepSeek-V3-0324",
+          "enum": [
+            "deepseek-ai/DeepSeek-V3-0324",
+            "Qwen/Qwen2.5-Coder-32B-Instruct",
+            "deepseek-ai/DeepSeek-R1",
+            "Qwen/Qwen3-235B-A22B",
+            "Qwen/Qwen3-32B",
+            "Qwen/Qwen2.5-72B-Instruct",
+            "meta-llama/Llama-3.3-70B-Instruct",
+            "mistralai/Mixtral-8x22B-Instruct-v0.1"
+          ],
+          "enumDescriptions": [
+            "DeepSeek V3 - Best for agents, excellent instruction following (RECOMMENDED)",
+            "Qwen Coder 32B - Fast, optimized for coding tasks",
+            "DeepSeek R1 - Deep reasoning, good for complex debugging",
+            "Qwen3 235B - Large MoE, can be verbose",
+            "Qwen3 32B - Fast general purpose",
+            "Qwen 72B - Good balance of speed/quality",
+            "Llama 3.3 70B - Meta's flagship model",
+            "Mixtral 8x22B - Mistral's MoE model"
+          ],
+          "description": "Model for agents. DeepSeek-V3 recommended for best instruction following."
+        },
+        "liftoff.autoHandoff": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically spawn agents when handoffs are detected"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "lint": "eslint src --ext ts"
+  },
+  "devDependencies": {
+    "@types/node": "^20.10.0",
+    "@types/vscode": "^1.85.0",
+    "typescript": "^5.3.0"
+  },
+  "dependencies": {
+    "playwright": "^1.40.0"
+  }
+}
