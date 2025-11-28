@@ -475,6 +475,42 @@ OUTPUT A TOOL BLOCK NOW - nothing else!`
         this._onAgentUpdate.fire(agent);
     }
 
+    /**
+     * Attempt to fix common JSON errors from LLMs
+     */
+    private fixJson(json: string): string {
+        let fixed = json.trim();
+
+        // Remove trailing garbage after valid JSON
+        // e.g., {"name": "foo", "params": {}}"}  -> {"name": "foo", "params": {}}
+        const extraBraceMatch = fixed.match(/^(\{[\s\S]*\})\}+["\s]*$/);
+        if (extraBraceMatch) {
+            fixed = extraBraceMatch[1];
+        }
+
+        // Fix unclosed strings in code params (common with fs.read)
+        // e.g., {"code": "return fs.read('file.ts')}}"} -> fix quotes
+        fixed = fixed.replace(/'\)\}*"\}*$/, "')\"}");
+
+        // Balance braces - count { and } and add missing ones
+        const openBraces = (fixed.match(/\{/g) || []).length;
+        const closeBraces = (fixed.match(/\}/g) || []).length;
+        if (openBraces > closeBraces) {
+            fixed += '}'.repeat(openBraces - closeBraces);
+        } else if (closeBraces > openBraces) {
+            // Remove extra closing braces from the end
+            const excess = closeBraces - openBraces;
+            for (let i = 0; i < excess; i++) {
+                const lastBrace = fixed.lastIndexOf('}');
+                if (lastBrace > 0) {
+                    fixed = fixed.substring(0, lastBrace) + fixed.substring(lastBrace + 1);
+                }
+            }
+        }
+
+        return fixed;
+    }
+
     private parseToolCalls(response: string): Array<{ name: string; params: Record<string, any> }> {
         const calls: Array<{ name: string; params: Record<string, any> }> = [];
 
@@ -482,23 +518,44 @@ OUTPUT A TOOL BLOCK NOW - nothing else!`
         let match;
 
         while ((match = toolBlockRegex.exec(response)) !== null) {
+            let json = match[1].trim();
+
+            // Try parsing directly first
+            let parsed: any = null;
             try {
-                const json = match[1].trim();
-                const parsed = JSON.parse(json);
-                if (parsed.name && typeof parsed.name === 'string') {
-                    const { name, params, ...rest } = parsed;
-                    const extractedParams = params || (Object.keys(rest).length > 0 ? rest : {});
-
-                    this.outputChannel.appendLine(`[parseToolCalls] Extracted tool: ${name}, params: ${JSON.stringify(extractedParams)}`);
-
-                    calls.push({
-                        name: name,
-                        params: extractedParams
-                    });
-                    break;
-                }
+                parsed = JSON.parse(json);
             } catch (e) {
-                this.outputChannel.appendLine(`Failed to parse: ${match[1]}`);
+                // Try fixing common JSON errors
+                this.outputChannel.appendLine(`[parseToolCalls] JSON parse failed, attempting fix: ${json}`);
+                try {
+                    const fixed = this.fixJson(json);
+                    this.outputChannel.appendLine(`[parseToolCalls] Fixed JSON: ${fixed}`);
+                    parsed = JSON.parse(fixed);
+                } catch (e2) {
+                    // Last resort: try to extract name and code manually
+                    const nameMatch = json.match(/"name"\s*:\s*"([^"]+)"/);
+                    const codeMatch = json.match(/"code"\s*:\s*"([\s\S]+?)(?:"\s*\}|"$)/);
+                    if (nameMatch && codeMatch) {
+                        parsed = { name: nameMatch[1], params: { code: codeMatch[1] } };
+                        this.outputChannel.appendLine(`[parseToolCalls] Extracted via regex: ${JSON.stringify(parsed)}`);
+                    } else {
+                        this.outputChannel.appendLine(`[parseToolCalls] Failed to parse: ${json}`);
+                        continue;
+                    }
+                }
+            }
+
+            if (parsed && parsed.name && typeof parsed.name === 'string') {
+                const { name, params, ...rest } = parsed;
+                const extractedParams = params || (Object.keys(rest).length > 0 ? rest : {});
+
+                this.outputChannel.appendLine(`[parseToolCalls] Extracted tool: ${name}, params: ${JSON.stringify(extractedParams)}`);
+
+                calls.push({
+                    name: name,
+                    params: extractedParams
+                });
+                break;
             }
         }
 
