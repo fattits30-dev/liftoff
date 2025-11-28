@@ -217,7 +217,7 @@ export class AutonomousAgentManager {
     private hybridRouter: HybridRouter | null = null;
     private ollamaProvider: OllamaProvider | null = null;
     private executionMode: ExecutionMode = 'cloud';
-    private localModel: string = 'devstral:latest';
+    private localModel: string = 'qwen2.5-coder:7b-instruct-q5_K_M';
     private ollamaUrl: string = 'http://localhost:11434';
 
     private readonly _onAgentUpdate = new vscode.EventEmitter<Agent>();

@@ -147,7 +147,7 @@
         },
         "liftoff.ollamaModel": {
           "type": "string",
-          "default": "devstral:latest",
+          "default": "qwen2.5-coder:7b-instruct-q5_K_M",
           "enum": [
             "devstral:latest",
             "devstral:small",
