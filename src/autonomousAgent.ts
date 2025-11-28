@@ -6,7 +6,7 @@ import { GIT_TOOLS } from './tools/git';
 import { LessonsManager, Lesson } from './tools/lessons';
 import { Artifact } from './agentCommunication';
 import { getMcpRouter, McpRouter, disposeMcpRouter } from './mcp';
-import { UnifiedExecutor, getUnifiedToolDescription } from './mcp/unified-executor';
+import { UnifiedExecutor, getUnifiedToolDescription, getSafetyRulesForPrompt } from './mcp/unified-executor';
 
 export type AgentType = 'frontend' | 'backend' | 'testing' | 'browser' | 'general' | 'cleaner';
 export type AgentStatus = 'idle' | 'running' | 'waiting_user' | 'completed' | 'error' | 'stopped';
@@ -153,9 +153,13 @@ EXAMPLES:
 \`\`\``
     };
 
+    const safetyRules = getSafetyRulesForPrompt();
+
     return `${typeInstructions[type]}
 
 ${executeToolSection}
+
+${safetyRules}
 
 # Tool Format
 Always use this EXACT format for tool calls:
@@ -173,7 +177,12 @@ OR to ask the user a question:
 {"name": "ask_user", "params": {"question": "Your question here"}}
 \`\`\`
 
-IMPORTANT: Use \`return\` to get results back. Scripts handle data - return only what's needed.`;
+IMPORTANT:
+- Use \`return\` to get results back. Scripts handle data - return only what's needed.
+- READ files before modifying them. Understand the full context.
+- Make minimal, focused changes. Don't rewrite entire files for small fixes.
+- If you corrupt a file, use fs.restore(path) to revert it.
+- After EVERY code change, verify it works before moving on.`;
 }
 
 export class AutonomousAgentManager {

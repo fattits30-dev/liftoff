@@ -5,9 +5,19 @@
  * Instead of exposing 50+ tools, agents get ONE tool: execute({ code: "..." })
  *
  * Security Model: Workspace + Home
- * - WRITE: workspace only
+ * - WRITE: workspace only (with validation + backup)
  * - READ: workspace + home directory
  * - BLOCKED: .env, .ssh, .aws, credentials, node_modules, .git/objects
+ *
+ * Safety Features (based on Anthropic & OpenSSF best practices):
+ * - Pre-write syntax validation
+ * - Automatic file backup before modifications
+ * - Rate limiting for destructive operations
+ * - Protected file patterns
+ * - Diff analysis for risky changes
+ *
+ * @see https://www.anthropic.com/engineering/claude-code-best-practices
+ * @see https://best.openssf.org/Security-Focused-Guide-for-AI-Code-Assistant-Instructions
  */
 
 import * as fs from 'fs';
@@ -15,6 +25,7 @@ import * as nodePath from 'path';
 import { execSync, spawn } from 'child_process';
 import * as vm from 'vm';
 import * as vscode from 'vscode';
+import { SafetyGuardrails, getSafetyRulesForPrompt } from '../safety/guardrails';
 
 // ============================================================================
 // Types
@@ -244,7 +255,7 @@ function createVSCodeAPI() {
 // Sandbox Factory
 // ============================================================================
 
-function createSandbox(workspaceRoot: string, browserManager: BrowserManager) {
+function createSandbox(workspaceRoot: string, browserManager: BrowserManager, guardrails: SafetyGuardrails) {
     const homeDir = process.env.HOME || process.env.USERPROFILE || '';
 
     return {
@@ -262,12 +273,76 @@ function createSandbox(workspaceRoot: string, browserManager: BrowserManager) {
             write: (filePath: string, content: string): string => {
                 try {
                     const fullPath = validatePath(filePath, workspaceRoot, 'write');
+
+                    // Safety check: Rate limiting and protected file check
+                    const safetyCheck = guardrails.checkFileOperation(filePath, 'write');
+                    if (!safetyCheck.allowed) {
+                        throw new Error(`Safety blocked: ${safetyCheck.reason}`);
+                    }
+                    if (safetyCheck.requiresConfirmation) {
+                        throw new Error(`Protected file requires confirmation: ${filePath}. Use fs.writeForce() if you're sure.`);
+                    }
+
+                    // Backup existing file before modification
+                    if (fs.existsSync(fullPath)) {
+                        guardrails.backupFile(fullPath);
+                    }
+
+                    // Validate syntax before writing
+                    const validation = guardrails.validateSyntax(filePath, content);
+                    if (!validation.valid) {
+                        throw new Error(`Syntax validation failed:\n${validation.errors.join('\n')}`);
+                    }
+
+                    // Analyze diff for potential issues
+                    if (fs.existsSync(fullPath)) {
+                        const original = fs.readFileSync(fullPath, 'utf-8');
+                        const issues = guardrails.analyzeDiff(original, content);
+                        if (issues.length > 0) {
+                            // Log warnings but don't block
+                            console.warn(`[SafetyWarning] ${filePath}:\n${issues.join('\n')}`);
+                        }
+                    }
+
+                    // Write file
                     fs.mkdirSync(nodePath.dirname(fullPath), { recursive: true });
                     fs.writeFileSync(fullPath, content, 'utf-8');
                     return `Written ${content.length} bytes to ${filePath}`;
                 } catch (err: any) {
                     throw new Error(`Failed to write ${filePath}: ${err.message}`);
                 }
+            },
+
+            // Force write (bypasses confirmation for protected files, but still validates syntax)
+            writeForce: (filePath: string, content: string): string => {
+                try {
+                    const fullPath = validatePath(filePath, workspaceRoot, 'write');
+
+                    // Still validate syntax even for forced writes
+                    const validation = guardrails.validateSyntax(filePath, content);
+                    if (!validation.valid) {
+                        throw new Error(`Syntax validation failed:\n${validation.errors.join('\n')}`);
+                    }
+
+                    // Backup existing file before modification
+                    if (fs.existsSync(fullPath)) {
+                        guardrails.backupFile(fullPath);
+                    }
+
+                    fs.mkdirSync(nodePath.dirname(fullPath), { recursive: true });
+                    fs.writeFileSync(fullPath, content, 'utf-8');
+                    return `[FORCE] Written ${content.length} bytes to ${filePath}`;
+                } catch (err: any) {
+                    throw new Error(`Failed to write ${filePath}: ${err.message}`);
+                }
+            },
+
+            // Restore file from backup
+            restore: (filePath: string): string => {
+                if (guardrails.restoreFile(filePath)) {
+                    return `Restored ${filePath} from backup`;
+                }
+                throw new Error(`No backup found for ${filePath}`);
             },
 
             exists: (filePath: string): boolean => {
@@ -309,9 +384,22 @@ function createSandbox(workspaceRoot: string, browserManager: BrowserManager) {
                 return fs.readdirSync(fullPath).filter(f => !isProtectedPath(f));
             },
 
-            delete: (filePath: string): void => {
+            delete: (filePath: string): string => {
                 const fullPath = validatePath(filePath, workspaceRoot, 'write');
+
+                // Safety check: Rate limiting
+                const safetyCheck = guardrails.checkFileOperation(filePath, 'delete');
+                if (!safetyCheck.allowed) {
+                    throw new Error(`Safety blocked: ${safetyCheck.reason}`);
+                }
+
+                // Backup before delete
+                if (fs.existsSync(fullPath)) {
+                    guardrails.backupFile(fullPath);
+                }
+
                 fs.unlinkSync(fullPath);
+                return `Deleted ${filePath}`;
             },
 
             mkdir: (dirPath: string): void => {
@@ -378,6 +466,12 @@ function createSandbox(workspaceRoot: string, browserManager: BrowserManager) {
         // Shell/Command API
         shell: {
             run: (command: string, options?: { cwd?: string; timeout?: number }): string => {
+                // Safety check: Block dangerous commands
+                const cmdCheck = guardrails.checkCommand(command);
+                if (!cmdCheck.allowed) {
+                    throw new Error(`Dangerous command blocked: ${cmdCheck.reason}`);
+                }
+
                 const cwd = options?.cwd
                     ? validatePath(options.cwd, workspaceRoot, 'read')
                     : workspaceRoot;
@@ -394,13 +488,13 @@ function createSandbox(workspaceRoot: string, browserManager: BrowserManager) {
                     const stdout = err.stdout?.toString() || '';
                     const stderr = err.stderr?.toString() || '';
                     const exitCode = err.status ?? 'unknown';
-                    
+
                     // Return combined output with clear failure indication
                     let output = '';
                     if (stdout) output += stdout;
                     if (stderr) output += (output ? '\n' : '') + stderr;
                     if (!output) output = err.message;
-                    
+
                     return `[EXIT CODE: ${exitCode}]\n${output}`;
                 }
             },
@@ -640,12 +734,35 @@ function createSandbox(workspaceRoot: string, browserManager: BrowserManager) {
 export class UnifiedExecutor {
     private workspaceRoot: string;
     private browserManager: BrowserManager;
+    private guardrails: SafetyGuardrails;
     private defaultTimeout: number;
 
     constructor(workspaceRoot: string, timeout: number = 300000) {
         this.workspaceRoot = workspaceRoot;
         this.browserManager = new BrowserManager();
+        this.guardrails = new SafetyGuardrails(workspaceRoot);
         this.defaultTimeout = timeout;
+    }
+
+    /**
+     * Create a checkpoint before making significant changes
+     */
+    createCheckpoint(description: string): string {
+        return this.guardrails.createCheckpoint(description);
+    }
+
+    /**
+     * Rollback to a previous checkpoint
+     */
+    rollback(checkpointId: string): boolean {
+        return this.guardrails.rollback(checkpointId);
+    }
+
+    /**
+     * Get safety status
+     */
+    getSafetyStatus() {
+        return this.guardrails.getStatus();
     }
 
     /**
@@ -656,7 +773,7 @@ export class UnifiedExecutor {
         const effectiveTimeout = timeout || this.defaultTimeout;
 
         try {
-            const sandbox = createSandbox(this.workspaceRoot, this.browserManager);
+            const sandbox = createSandbox(this.workspaceRoot, this.browserManager, this.guardrails);
 
             // Wrap code to handle both sync and async, with explicit return
             const wrappedCode = `
@@ -724,8 +841,9 @@ export function getUnifiedToolDescription(): string {
 
 **Available APIs:**
 \`\`\`
-fs.read(path), fs.write(path, content), fs.list(dir, {recursive}), fs.exists(path)
-fs.search(regex, dir), fs.delete(path), fs.mkdir(path), fs.readHome(relativePath)
+fs.read(path), fs.write(path, content), fs.writeForce(path, content), fs.restore(path)
+fs.list(dir, {recursive}), fs.exists(path), fs.search(regex, dir), fs.delete(path)
+fs.mkdir(path), fs.readHome(relativePath)
 
 shell.run(cmd, {cwd, timeout}), shell.runAsync(cmd)
 
@@ -748,7 +866,19 @@ JSON.parse(), JSON.stringify()
 workspace.root, workspace.name, home
 \`\`\`
 
-**Security:** Write only to workspace, read workspace + home. Protected: .env, .ssh, credentials, node_modules
+**Safety Features (auto-enabled):**
+- Syntax validation: fs.write() validates syntax before writing (Python, TypeScript, JS, JSON, YAML)
+- Auto-backup: Files are backed up before modification. Use fs.restore(path) to revert
+- Rate limiting: Max 20 writes/min, 5 deletes/min
+- Protected files: .env, credentials, secrets require fs.writeForce()
+- Command safety: Dangerous commands (rm -rf, DROP TABLE) are blocked
+
+**SAFETY RULES:**
+1. READ files before modifying them - understand the full context
+2. Make minimal, focused changes - don't rewrite entire files for small fixes
+3. Check for syntax errors AFTER edits: vscode.getProblems()
+4. If you made a mistake, use fs.restore(path) to revert
+5. NEVER use string.replace() blindly - understand what you're replacing
 
 **Example:**
 \`\`\`tool
@@ -760,6 +890,11 @@ workspace.root, workspace.name, home
 
 Use \`return\` for results. Scripts handle data - return only what's needed.`;
 }
+
+/**
+ * Get safety rules for inclusion in agent system prompts
+ */
+export { getSafetyRulesForPrompt } from '../safety/guardrails';
 
 // ============================================================================
 // Tool Schema (for MCP compatibility)

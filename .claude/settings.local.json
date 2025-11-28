@@ -18,7 +18,8 @@
       "mcp__fetch__fetch_markdown",
       "WebFetch(domain:www.anthropic.com)",
       "WebFetch(domain:blog.cloudflare.com)",
-      "mcp__serena__replace_symbol_body"
+      "mcp__serena__replace_symbol_body",
+      "WebFetch(domain:best.openssf.org)"
     ],
     "deny": [],
     "ask": []
