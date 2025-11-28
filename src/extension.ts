@@ -24,9 +24,11 @@ export function activate(context: vscode.ExtensionContext) {
     
     agentManager.onAgentUpdate(() => {
         const running = agentManager.getRunningAgents().length;
+        const mode = agentManager.getExecutionMode();
+        const modeIcon = mode === 'local' ? '🏠' : mode === 'hybrid' ? '🔀' : '☁️';
         statusBarItem.text = running > 0 
-            ? `$(rocket) Liftoff (${running} active)`
-            : '$(rocket) Liftoff';
+            ? `$(rocket) Liftoff ${modeIcon} (${running} active)`
+            : `$(rocket) Liftoff ${modeIcon}`;
     });
     
     // Webview providers
@@ -220,11 +222,106 @@ export function activate(context: vscode.ExtensionContext) {
                     vscode.commands.executeCommand('workbench.action.reloadWindow');
                 }
             });
+        }),
+
+        vscode.commands.registerCommand('liftoff.configureOllama', async () => {
+            const config = vscode.workspace.getConfiguration('liftoff');
+            
+            // Select execution mode
+            const modes = [
+                { label: '☁️ Cloud Only', description: 'Use HuggingFace for all inference', value: 'cloud' },
+                { label: '🏠 Local Only', description: 'Use Ollama for all inference (requires local setup)', value: 'local' },
+                { label: '🔀 Hybrid', description: 'Cloud brain + local muscle (recommended)', value: 'hybrid' }
+            ];
+            
+            const selectedMode = await vscode.window.showQuickPick(modes, {
+                placeHolder: 'Select execution mode'
+            });
+            if (!selectedMode) return;
+            
+            await config.update('executionMode', selectedMode.value, true);
+            agentManager.setExecutionMode(selectedMode.value as any);
+            
+            if (selectedMode.value !== 'cloud') {
+                // Configure Ollama URL
+                const url = await vscode.window.showInputBox({
+                    prompt: 'Ollama URL',
+                    value: config.get('ollamaUrl') || 'http://localhost:11434',
+                    placeHolder: 'http://localhost:11434'
+                });
+                if (url) {
+                    await config.update('ollamaUrl', url, true);
+                }
+                
+                // Select local model
+                const models = [
+                    { label: 'devstral:latest', description: 'Mistral coding model (recommended)' },
+                    { label: 'qwen2.5-coder:7b-instruct', description: 'Fast, fits in 8GB VRAM' },
+                    { label: 'qwen2.5-coder:14b-instruct', description: 'Good balance' },
+                    { label: 'qwen2.5-coder:32b-instruct', description: 'Best quality (needs high VRAM)' },
+                    { label: 'codellama:13b-instruct', description: 'Meta CodeLlama' },
+                    { label: 'deepseek-coder-v2:latest', description: 'DeepSeek coder' }
+                ];
+                
+                const selectedModel = await vscode.window.showQuickPick(models, {
+                    placeHolder: 'Select local model'
+                });
+                if (selectedModel) {
+                    await config.update('ollamaModel', selectedModel.label, true);
+                }
+                
+                // Test connection
+                const available = await agentManager.configureLocal({
+                    url: url || config.get('ollamaUrl'),
+                    model: selectedModel?.label || config.get('ollamaModel')
+                });
+                
+                if (available) {
+                    vscode.window.showInformationMessage(`✅ Ollama configured! Mode: ${selectedMode.value}`);
+                } else {
+                    vscode.window.showWarningMessage(
+                        '⚠️ Ollama not reachable. Make sure it\'s running: ollama serve',
+                        'Check Status'
+                    ).then(action => {
+                        if (action) vscode.commands.executeCommand('liftoff.checkLocalStatus');
+                    });
+                }
+            } else {
+                vscode.window.showInformationMessage('☁️ Cloud-only mode enabled');
+            }
+        }),
+
+        vscode.commands.registerCommand('liftoff.checkLocalStatus', async () => {
+            const available = await agentManager.isLocalAvailable();
+            const stats = agentManager.getHybridStats();
+            
+            if (available) {
+                const models = await agentManager.listLocalModels();
+                const modelList = models.length > 0 ? models.slice(0, 5).join(', ') : 'None found';
+                
+                vscode.window.showInformationMessage(
+                    `✅ Ollama Status: Available | Models: ${modelList} | ` +
+                    `Local calls: ${stats.localCallsThisHour} | Latency: ${stats.averageLocalLatency.toFixed(0)}ms`
+                );
+            } else {
+                vscode.window.showErrorMessage(
+                    '❌ Ollama not available. Start it with: ollama serve'
+                );
+            }
         })
     );
     
-    // Prompt for API key if not set
+    // Apply execution mode from config
     const config = vscode.workspace.getConfiguration('liftoff');
+    const executionMode = config.get<string>('executionMode') || 'cloud';
+    agentManager.setExecutionMode(executionMode as any);
+    
+    // Configure Ollama from settings
+    const ollamaUrl = config.get<string>('ollamaUrl') || 'http://localhost:11434';
+    const ollamaModel = config.get<string>('ollamaModel') || 'devstral:latest';
+    agentManager.configureLocal({ url: ollamaUrl, model: ollamaModel });
+    
+    // Prompt for API key if not set
     if (!config.get<string>('huggingfaceApiKey')) {
         vscode.window.showInformationMessage(
             '🚀 Liftoff ready! Set your HuggingFace API key to start.',

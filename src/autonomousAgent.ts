@@ -7,6 +7,8 @@ import { LessonsManager, Lesson } from './tools/lessons';
 import { Artifact } from './agentCommunication';
 import { getMcpRouter, McpRouter, disposeMcpRouter } from './mcp';
 import { UnifiedExecutor, getUnifiedToolDescription, getSafetyRulesForPrompt } from './mcp/unified-executor';
+import { HybridRouter, ExecutionTarget, TaskClassification } from './providers/hybridRouter';
+import { OllamaProvider, LOCAL_CODING_MODELS } from './providers/ollama';
 
 export type AgentType = 'frontend' | 'backend' | 'testing' | 'browser' | 'general' | 'cleaner';
 export type AgentStatus = 'idle' | 'running' | 'waiting_user' | 'completed' | 'error' | 'stopped';
@@ -25,6 +27,21 @@ export interface Agent {
     startTime: Date;
     endTime?: Date;
     abortController?: AbortController;
+    // Hybrid execution tracking
+    executionTarget?: ExecutionTarget;
+    cloudCalls?: number;
+    localCalls?: number;
+}
+
+export type ExecutionMode = 'cloud' | 'local' | 'hybrid';
+
+export interface HybridStats {
+    cloudAvailable: boolean;
+    localAvailable: boolean;
+    cloudCallsThisHour: number;
+    localCallsThisHour: number;
+    averageCloudLatency: number;
+    averageLocalLatency: number;
 }
 
 const AGENT_EMOJIS: Record<AgentType, string> = {
@@ -196,6 +213,13 @@ export class AutonomousAgentManager {
     private lessons: LessonsManager;
     private pendingErrors: Map<string, { error: string; context: string; timestamp: number }> = new Map();
 
+    // Hybrid execution support
+    private hybridRouter: HybridRouter | null = null;
+    private ollamaProvider: OllamaProvider | null = null;
+    private executionMode: ExecutionMode = 'cloud';
+    private localModel: string = 'devstral:latest';
+    private ollamaUrl: string = 'http://localhost:11434';
+
     private readonly _onAgentUpdate = new vscode.EventEmitter<Agent>();
     public readonly onAgentUpdate = this._onAgentUpdate.event;
     private readonly _onAgentOutput = new vscode.EventEmitter<{ agentId: string; content: string; type: 'thought' | 'tool' | 'result' | 'error' }>();
@@ -211,14 +235,123 @@ export class AutonomousAgentManager {
         this.outputChannel = vscode.window.createOutputChannel('Liftoff Agents');
         this.unifiedExecutor = new UnifiedExecutor(this.workspaceRoot);
         this.lessons = new LessonsManager(this.workspaceRoot);
+
+        // Initialize Ollama provider for local execution
+        this.ollamaProvider = new OllamaProvider({
+            baseUrl: this.ollamaUrl,
+            model: this.localModel,
+            contextLength: 8192,
+        });
     }
 
     setApiKey(apiKey: string): void {
         this.hfProvider = new HuggingFaceProvider(apiKey);
-        this.outputChannel.appendLine('[AgentManager] API key set');
+        this.outputChannel.appendLine('[AgentManager] Cloud API key set');
+
+        // Initialize Hybrid Router with both cloud and local
+        this.hybridRouter = new HybridRouter({
+            cloudModel: this.defaultModel,
+            cloudApiKey: apiKey,
+            localModel: this.localModel,
+            ollamaUrl: this.ollamaUrl,
+        });
+
+        // Initialize and check availability
+        this.hybridRouter.initialize(apiKey).then(availability => {
+            this.outputChannel.appendLine(`[AgentManager] Hybrid router initialized - Cloud: ${availability.cloud}, Local: ${availability.local}`);
+            if (availability.local) {
+                this.outputChannel.appendLine(`[AgentManager] 🏠 Local Ollama available at ${this.ollamaUrl}`);
+            }
+        });
 
         // Initialize MCP Router (async)
         this.initMcpRouter();
+    }
+
+    /**
+     * Set execution mode: cloud, local, or hybrid
+     */
+    setExecutionMode(mode: ExecutionMode): void {
+        this.executionMode = mode;
+        this.outputChannel.appendLine(`[AgentManager] Execution mode set to: ${mode}`);
+    }
+
+    /**
+     * Get current execution mode
+     */
+    getExecutionMode(): ExecutionMode {
+        return this.executionMode;
+    }
+
+    /**
+     * Configure local Ollama settings
+     */
+    async configureLocal(options: { url?: string; model?: string }): Promise<boolean> {
+        if (options.url) {
+            this.ollamaUrl = options.url;
+        }
+        if (options.model) {
+            this.localModel = options.model;
+        }
+
+        // Update providers
+        this.ollamaProvider = new OllamaProvider({
+            baseUrl: this.ollamaUrl,
+            model: this.localModel,
+            contextLength: 8192,
+        });
+
+        if (this.hybridRouter) {
+            this.hybridRouter.setLocalModel(this.localModel);
+        }
+
+        // Check availability
+        const available = await this.ollamaProvider.isAvailable();
+        this.outputChannel.appendLine(`[AgentManager] Local Ollama ${available ? '✅ available' : '❌ unavailable'} at ${this.ollamaUrl}`);
+
+        return available;
+    }
+
+    /**
+     * Get hybrid execution stats
+     */
+    getHybridStats(): HybridStats {
+        const availability = this.hybridRouter?.getAvailability() || { cloud: false, local: false };
+        const stats = this.hybridRouter?.getStats() || {
+            cloudCallsThisHour: 0,
+            localCallsThisHour: 0,
+            averageCloudLatency: 0,
+            averageLocalLatency: 0,
+        };
+
+        return {
+            cloudAvailable: availability.cloud,
+            localAvailable: availability.local,
+            cloudCallsThisHour: stats.cloudCallsThisHour,
+            localCallsThisHour: stats.localCallsThisHour,
+            averageCloudLatency: stats.averageCloudLatency,
+            averageLocalLatency: stats.averageLocalLatency,
+        };
+    }
+
+    /**
+     * List available local models
+     */
+    async listLocalModels(): Promise<string[]> {
+        if (!this.ollamaProvider) return [];
+        try {
+            const models = await this.ollamaProvider.listModels();
+            return models.map(m => m.name);
+        } catch {
+            return [];
+        }
+    }
+
+    /**
+     * Check if local execution is available
+     */
+    async isLocalAvailable(): Promise<boolean> {
+        return this.ollamaProvider?.isAvailable() ?? false;
     }
 
     private async initMcpRouter(): Promise<void> {
@@ -242,10 +375,32 @@ export class AutonomousAgentManager {
         this.outputChannel.appendLine(`[AgentManager] Default model set to: ${model}`);
     }
 
-    async spawnAgent(options: { type: AgentType; task: string; model?: string }): Promise<Agent> {
-        const { type, task, model } = options;
+    async spawnAgent(options: {
+        type: AgentType;
+        task: string;
+        model?: string;
+        executionMode?: ExecutionMode;
+    }): Promise<Agent> {
+        const { type, task, model, executionMode } = options;
         const id = `agent-${Date.now()}-${Math.random().toString(36).substring(2, 15)}`;
-        const actualModel = model || this.defaultModel;
+
+        // Determine execution target
+        const mode = executionMode || this.executionMode;
+        let actualModel = model || this.defaultModel;
+        let executionTarget: ExecutionTarget = 'cloud';
+
+        if (mode === 'local') {
+            actualModel = this.localModel;
+            executionTarget = 'local';
+        } else if (mode === 'hybrid' && this.hybridRouter) {
+            // Let hybrid router decide based on task
+            const classification = this.hybridRouter.classifyTask(task);
+            executionTarget = this.hybridRouter.decideTarget(classification);
+            if (executionTarget === 'local') {
+                actualModel = this.localModel;
+            }
+            this.outputChannel.appendLine(`[AgentManager] Hybrid routing: ${classification.type} task -> ${executionTarget} (${classification.reason})`);
+        }
 
         const mcpTools = getUnifiedToolDescription();
         const systemPrompt = getSystemPrompt(type, mcpTools);
@@ -265,12 +420,17 @@ export class AutonomousAgentManager {
             toolHistory: [],
             iterations: 0,
             startTime: new Date(),
-            abortController: new AbortController()
+            abortController: new AbortController(),
+            executionTarget,
+            cloudCalls: 0,
+            localCalls: 0,
         };
 
         this.agents.set(id, agent);
         this._onAgentUpdate.fire(agent);
-        this.outputChannel.appendLine(`[AgentManager] Spawned ${agent.name} with task: ${task}`);
+
+        const targetEmoji = executionTarget === 'local' ? '🏠' : '☁️';
+        this.outputChannel.appendLine(`[AgentManager] Spawned ${agent.name} ${targetEmoji} (${executionTarget}) with task: ${task}`);
 
         this.runAgentLoop(id);
 
@@ -279,7 +439,22 @@ export class AutonomousAgentManager {
 
     private async runAgentLoop(agentId: string): Promise<void> {
         const agent = this.agents.get(agentId);
-        if (!agent || !this.hfProvider) return;
+        if (!agent) return;
+
+        // Check provider availability based on execution target
+        if (agent.executionTarget === 'local') {
+            if (!this.ollamaProvider) {
+                this.emit(agentId, '❌ Local execution requested but Ollama not configured', 'error');
+                agent.status = 'error';
+                return;
+            }
+        } else {
+            if (!this.hfProvider) {
+                this.emit(agentId, '❌ Cloud execution requested but API key not set', 'error');
+                agent.status = 'error';
+                return;
+            }
+        }
 
         agent.status = 'running';
         this._onAgentUpdate.fire(agent);
@@ -300,23 +475,43 @@ export class AutonomousAgentManager {
                 this.emit(agentId, '\n\n💭 ', 'thought');
 
                 try {
-                    console.log(`[AgentLoop] Calling HF API with model: ${agent.model}`);
-                    for await (const chunk of this.hfProvider.streamChat(
-                        agent.model,
-                        agent.messages,
-                        { maxTokens: 2048, temperature: 0.2 }
-                    )) {
-                        if (agent.abortController?.signal.aborted) {
-                            console.log('[AgentLoop] Aborted during streaming');
-                            break;
+                    const targetEmoji = agent.executionTarget === 'local' ? '🏠' : '☁️';
+                    console.log(`[AgentLoop] ${targetEmoji} Calling ${agent.executionTarget} with model: ${agent.model}`);
+
+                    if (agent.executionTarget === 'local' && this.ollamaProvider) {
+                        // Local execution via Ollama
+                        for await (const chunk of this.ollamaProvider.streamChat(
+                            agent.messages,
+                            { temperature: 0.2, numCtx: 8192 }
+                        )) {
+                            if (agent.abortController?.signal.aborted) {
+                                console.log('[AgentLoop] Aborted during local streaming');
+                                break;
+                            }
+                            response += chunk;
+                            this.emit(agentId, chunk, 'thought');
                         }
-                        response += chunk;
-                        this.emit(agentId, chunk, 'thought');
+                        agent.localCalls = (agent.localCalls || 0) + 1;
+                    } else if (this.hfProvider) {
+                        // Cloud execution via HuggingFace
+                        for await (const chunk of this.hfProvider.streamChat(
+                            agent.model,
+                            agent.messages,
+                            { maxTokens: 2048, temperature: 0.2 }
+                        )) {
+                            if (agent.abortController?.signal.aborted) {
+                                console.log('[AgentLoop] Aborted during cloud streaming');
+                                break;
+                            }
+                            response += chunk;
+                            this.emit(agentId, chunk, 'thought');
+                        }
+                        agent.cloudCalls = (agent.cloudCalls || 0) + 1;
                     }
-                    console.log(`[AgentLoop] API response received, length: ${response.length}`);
+                    console.log(`[AgentLoop] ${targetEmoji} Response received, length: ${response.length}`);
                 } catch (apiError: any) {
                     console.error('[AgentLoop] API Error:', apiError);
-                    this.emit(agentId, `\n❌ API Error: ${apiError.message}`, 'error');
+                    this.emit(agentId, `\n❌ ${agent.executionTarget} API Error: ${apiError.message}`, 'error');
                     agent.status = 'error';
                     break;
                 }
