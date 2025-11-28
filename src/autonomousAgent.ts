@@ -579,6 +579,11 @@ OUTPUT A TOOL BLOCK NOW - nothing else!`
         }
     }
 
+    // Alias for stopAgent (used by UI panels)
+    killAgent(agentId: string): void {
+        this.stopAgent(agentId);
+    }
+
     stopAllAgents(): void {
         for (const agent of this.agents.values()) {
             if (agent.status === 'running') {

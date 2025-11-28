@@ -495,7 +495,7 @@ function createSandbox(workspaceRoot: string, browserManager: BrowserManager) {
             close: () => browserManager.close()
         },
 
-        // Test helpers (for pytest/jest/etc)
+        // Test helpers (for pytest/vitest/jest)
         test: {
             // Discover tests without running them
             discover: (dir: string = '.'): string => {
@@ -509,14 +509,26 @@ function createSandbox(workspaceRoot: string, browserManager: BrowserManager) {
                     });
                 } catch {
                     try {
-                        // Try npm test list
-                        return execSync('npm test -- --listTests', {
+                        // Try vitest list (vitest uses --list or list command)
+                        return execSync('npx vitest list 2>&1 || npx vitest --list 2>&1', {
                             cwd: fullPath,
                             encoding: 'utf-8',
-                            timeout: 30000
+                            timeout: 30000,
+                            shell: process.platform === 'win32' ? 'cmd.exe' : '/bin/bash'
                         });
                     } catch {
-                        return 'Could not discover tests';
+                        try {
+                            // Fallback: just list test files
+                            const testFiles = execSync('dir /s /b *test*.ts *test*.js *spec*.ts *spec*.js 2>nul || find . -name "*test*" -o -name "*spec*" 2>/dev/null', {
+                                cwd: fullPath,
+                                encoding: 'utf-8',
+                                timeout: 10000,
+                                shell: process.platform === 'win32' ? 'cmd.exe' : '/bin/bash'
+                            });
+                            return `Test files found:\n${testFiles}`;
+                        } catch {
+                            return 'Could not discover tests. Try running tests directly with test.run()';
+                        }
                     }
                 }
             },
@@ -533,7 +545,8 @@ function createSandbox(workspaceRoot: string, browserManager: BrowserManager) {
                             maxBuffer: 10 * 1024 * 1024
                         });
                     } else {
-                        return execSync(`npm test -- "${fullPath}"`, {
+                        // Use vitest for TypeScript/JavaScript tests
+                        return execSync(`npx vitest run "${testFile}" --reporter=verbose`, {
                             cwd: workspaceRoot,
                             encoding: 'utf-8',
                             timeout: 120000,
@@ -551,9 +564,27 @@ function createSandbox(workspaceRoot: string, browserManager: BrowserManager) {
             run: (pattern?: string, options?: { timeout?: number }): string => {
                 const timeout = options?.timeout || 180000; // 3 min default
                 try {
-                    const cmd = pattern 
-                        ? `python -m pytest -k "${pattern}" -v --tb=short`
-                        : 'python -m pytest -v --tb=short';
+                    // Detect project type and run appropriate test command
+                    const hasPytest = fs.existsSync(nodePath.join(workspaceRoot, 'pytest.ini')) ||
+                                      fs.existsSync(nodePath.join(workspaceRoot, 'pyproject.toml'));
+                    const hasVitest = fs.existsSync(nodePath.join(workspaceRoot, 'vitest.config.ts')) ||
+                                      fs.existsSync(nodePath.join(workspaceRoot, 'vitest.config.js'));
+
+                    let cmd: string;
+                    if (hasPytest || pattern?.endsWith('.py')) {
+                        cmd = pattern
+                            ? `python -m pytest -k "${pattern}" -v --tb=short`
+                            : 'python -m pytest -v --tb=short';
+                    } else if (hasVitest) {
+                        cmd = pattern
+                            ? `npx vitest run "${pattern}" --reporter=verbose`
+                            : 'npx vitest run --reporter=verbose';
+                    } else {
+                        cmd = pattern
+                            ? `npm test -- "${pattern}"`
+                            : 'npm test';
+                    }
+
                     return execSync(cmd, {
                         cwd: workspaceRoot,
                         encoding: 'utf-8',
