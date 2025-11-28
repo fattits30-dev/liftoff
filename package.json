@@ -55,6 +55,10 @@
       {
         "command": "liftoff.checkLocalStatus",
         "title": "Liftoff: Check Local Ollama Status"
+      },
+      {
+        "command": "liftoff.orchestratorChat",
+        "title": "Liftoff: Open Orchestrator Chat"
       }
     ],
     "viewsContainers": {

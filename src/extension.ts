@@ -4,8 +4,10 @@ import { ManagerViewProvider } from './managerViewProvider';
 import { ArtifactViewerProvider } from './artifactViewerProvider';
 import { LiftoffEditorPanel } from './liftoffEditorPanel';
 import { PersistenceManager } from './persistence';
+import { Orchestrator } from './orchestrator';
 
 let agentManager: AutonomousAgentManager;
+let orchestrator: Orchestrator;
 let persistenceManager: PersistenceManager;
 let statusBarItem: vscode.StatusBarItem;
 
@@ -13,6 +15,7 @@ export function activate(context: vscode.ExtensionContext) {
     console.log('🚀 Liftoff is now active!');
     
     agentManager = new AutonomousAgentManager(context);
+    orchestrator = new Orchestrator(agentManager);
     persistenceManager = new PersistenceManager(context);
     
     // Status bar
@@ -59,6 +62,7 @@ export function activate(context: vscode.ExtensionContext) {
             });
             if (apiKey) {
                 agentManager.setApiKey(apiKey);
+                orchestrator.setApiKey(apiKey);
                 const ok = await agentManager.testConnection();
                 vscode.window.showInformationMessage(
                     ok ? '✅ API key verified!' : '⚠️ Key set but connection test failed'
@@ -308,6 +312,53 @@ export function activate(context: vscode.ExtensionContext) {
                     '❌ Ollama not available. Start it with: ollama serve'
                 );
             }
+        }),
+
+        vscode.commands.registerCommand('liftoff.orchestratorChat', async () => {
+            const config = vscode.workspace.getConfiguration('liftoff');
+            if (!config.get<string>('huggingfaceApiKey')) {
+                const action = await vscode.window.showErrorMessage(
+                    'HuggingFace API key not set!', 'Set Key'
+                );
+                if (action) vscode.commands.executeCommand('liftoff.setApiKey');
+                return;
+            }
+
+            // Simple input-based chat for now
+            const task = await vscode.window.showInputBox({
+                prompt: '🧠 Orchestrator: What would you like me to do?',
+                placeHolder: 'e.g., Run the tests and fix any failures',
+                ignoreFocusOut: true
+            });
+
+            if (!task) return;
+
+            vscode.window.withProgress({
+                location: vscode.ProgressLocation.Notification,
+                title: '🧠 Orchestrator working...',
+                cancellable: false
+            }, async (progress) => {
+                progress.report({ message: 'Planning task...' });
+                
+                try {
+                    const response = await orchestrator.chat(task);
+                    
+                    // Show result in output channel
+                    orchestrator.showOutput();
+                    
+                    // Also show a summary notification
+                    const lines = response.split('\n').filter(l => l.trim());
+                    const summary = lines.slice(0, 3).join(' | ');
+                    vscode.window.showInformationMessage(
+                        summary.substring(0, 200) + (summary.length > 200 ? '...' : ''),
+                        'View Details'
+                    ).then(action => {
+                        if (action) orchestrator.showOutput();
+                    });
+                } catch (err: any) {
+                    vscode.window.showErrorMessage(`Orchestrator error: ${err.message}`);
+                }
+            });
         })
     );
     
@@ -329,9 +380,10 @@ export function activate(context: vscode.ExtensionContext) {
         ).then(a => { if (a) vscode.commands.executeCommand('liftoff.setApiKey'); });
     } else {
         agentManager.setApiKey(config.get<string>('huggingfaceApiKey')!);
+        orchestrator.setApiKey(config.get<string>('huggingfaceApiKey')!);
     }
     
-    context.subscriptions.push(statusBarItem, agentManager);
+    context.subscriptions.push(statusBarItem, agentManager, orchestrator);
 }
 
 export function deactivate() {
