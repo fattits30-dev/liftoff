@@ -182,7 +182,7 @@ export class AutonomousAgentManager {
     private mcpInitialized = false;
     private agents: Map<string, Agent> = new Map();
     private outputChannel: vscode.OutputChannel;
-    private defaultModel: string = 'deepseek';
+    private defaultModel: string = 'Qwen/Qwen3-Coder-30B-A3B-Instruct';
     private unifiedExecutor: UnifiedExecutor;
     private lessons: LessonsManager;
     private pendingErrors: Map<string, { error: string; context: string; timestamp: number }> = new Map();

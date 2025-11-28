@@ -14,13 +14,16 @@ export interface HFConfig {
 
 // Available coding models via HF Inference Providers
 export const CODING_MODELS = {
+    'qwen3-coder': 'Qwen/Qwen3-Coder-30B-A3B-Instruct',  // Latest, recommended
     'qwen-32b': 'Qwen/Qwen2.5-Coder-32B-Instruct',
-    'qwen-14b': 'Qwen/Qwen2.5-Coder-14B-Instruct', 
+    'qwen-14b': 'Qwen/Qwen2.5-Coder-14B-Instruct',
     'qwen-7b': 'Qwen/Qwen2.5-Coder-7B-Instruct',
     'deepseek-v3': 'deepseek-ai/DeepSeek-V3-0324',
     'deepseek-r1': 'deepseek-ai/DeepSeek-R1',
     'llama-70b': 'meta-llama/Llama-3.3-70B-Instruct'
 } as const;
+
+export const DEFAULT_MODEL = 'Qwen/Qwen3-Coder-30B-A3B-Instruct';
 
 export type ModelKey = keyof typeof CODING_MODELS;
 
