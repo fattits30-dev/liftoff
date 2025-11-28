@@ -182,7 +182,7 @@ export class AutonomousAgentManager {
     private mcpInitialized = false;
     private agents: Map<string, Agent> = new Map();
     private outputChannel: vscode.OutputChannel;
-    private defaultModel: string = 'Qwen/Qwen3-Coder-30B-A3B-Instruct';
+    private defaultModel: string = 'meta-llama/Llama-3.3-70B-Instruct';
     private unifiedExecutor: UnifiedExecutor;
     private lessons: LessonsManager;
     private pendingErrors: Map<string, { error: string; context: string; timestamp: number }> = new Map();
