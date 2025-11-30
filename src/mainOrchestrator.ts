@@ -30,6 +30,7 @@ import { SemanticMemoryStore, OrchestratorMemory } from './memory/agentMemory';
 import { DEFAULT_CLOUD_MODEL_NAME, LIMITS } from './config';
 import { AgentType } from './types/agentTypes';
 import { getMcpRouter } from './mcp';
+import { AppBuilderOrchestrator } from './appBuilder/appBuilderOrchestrator';
 
 export interface TodoItem {
     task: string;
@@ -502,10 +503,197 @@ export class MainOrchestrator {
         this.retryTracker.clear();
 
         try {
+            // CRITICAL: Detect if this is an app building request
+            const isAppBuildRequest = this.detectAppBuildRequest(userMessage);
+
+            if (isAppBuildRequest) {
+                this.log('🎯 Detected APP BUILD request - entering AppBuilder mode');
+                return await this.handleAppBuild(userMessage);
+            }
+
+            // Normal code editing flow
+            this.log('🔧 CODE EDITING mode - using normal delegation');
             return await this.planningLoop();
         } catch (err: any) {
             this.setStatus('error');
             return `❌ Error: ${err.message}`;
+        }
+    }
+
+    /**
+     * Detect if user wants to build a new app vs edit existing code
+     */
+    private detectAppBuildRequest(message: string): boolean {
+        const msg = message.toLowerCase();
+
+        // Strong indicators of app building
+        const buildIndicators = [
+            'build me',
+            'build a',
+            'build an',
+            'create a new app',
+            'create an app',
+            'make me a',
+            'make me an',
+            'make a new',
+            'create a project',
+            'build a project',
+            'scaffold',
+            'generate an app',
+            'generate a new',
+            'i want to build',
+            'i want an app',
+            'i need an app',
+            'develop a new app',
+            'develop an app',
+            'start a new project',
+            'new application'
+        ];
+
+        // Check for build indicators
+        const hasBuildIndicator = buildIndicators.some(indicator => msg.includes(indicator));
+
+        // Keywords that suggest it's an app description, not code editing
+        const appKeywords = [
+            'with authentication',
+            'with auth',
+            'user login',
+            'database',
+            'supabase',
+            'real-time',
+            'file upload',
+            'payments',
+            'shopping cart',
+            'dashboard',
+            'admin panel',
+            'calendar',
+            'chat feature',
+            'social media',
+            'ecommerce',
+            'blog platform',
+            'landing page'
+        ];
+
+        const hasAppKeywords = appKeywords.some(kw => msg.includes(kw));
+
+        // App type keywords
+        const appTypes = [
+            'saas',
+            'crud app',
+            'e-commerce',
+            'ecommerce',
+            'marketplace',
+            'portfolio site',
+            'blog',
+            'cms',
+            'social network',
+            'task manager',
+            'todo app',
+            'project management',
+            'booking system',
+            'reservation',
+            'recipe app',
+            'fitness tracker',
+            'habit tracker'
+        ];
+
+        const hasAppType = appTypes.some(type => msg.includes(type));
+
+        // Code editing indicators (should NOT trigger app build)
+        const editIndicators = [
+            'fix the',
+            'debug',
+            'refactor',
+            'update the',
+            'change the',
+            'modify',
+            'add a function',
+            'add a method',
+            'improve the',
+            'optimize',
+            'bug in',
+            'error in',
+            'issue with'
+        ];
+
+        const hasEditIndicator = editIndicators.some(indicator => msg.includes(indicator));
+
+        // Decision logic
+        if (hasEditIndicator) {
+            return false; // Definitely code editing
+        }
+
+        if (hasBuildIndicator) {
+            return true; // Explicit build request
+        }
+
+        if (hasAppType && hasAppKeywords) {
+            return true; // Describing an app to build
+        }
+
+        // Default to code editing if unclear
+        return false;
+    }
+
+    /**
+     * Handle app building using AppBuilderOrchestrator
+     */
+    private async handleAppBuild(userMessage: string): Promise<string> {
+        this.log('📋 Starting AppBuilder workflow...');
+
+        // Ask user where to create the project
+        const defaultDir = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ||
+                          this.workspaceRoot;
+
+        const targetFolder = await vscode.window.showOpenDialog({
+            canSelectFolders: true,
+            canSelectFiles: false,
+            canSelectMany: false,
+            openLabel: 'Select Project Location',
+            defaultUri: vscode.Uri.file(defaultDir)
+        });
+
+        if (!targetFolder || targetFolder.length === 0) {
+            return '❌ App build cancelled - no folder selected';
+        }
+
+        const targetDir = targetFolder[0].fsPath;
+        this.log(`Target directory: ${targetDir}`);
+
+        // Create AppBuilderOrchestrator and run
+        const extensionPath = vscode.extensions.getExtension('anthropic.liftoff')?.extensionPath || '';
+        const appBuilder = new AppBuilderOrchestrator(extensionPath, this);
+
+        this._onThought.fire('\n📋 **ENTERING APP BUILDER MODE**\n');
+        this._onThought.fire('Following structured workflow: SPEC → ARCHITECTURE → SCAFFOLD → IMPLEMENT → TEST → DEPLOY\n\n');
+
+        try {
+            const result = await appBuilder.buildApp(userMessage, targetDir);
+
+            if (result.success) {
+                let summary = `✅ **App Build Complete!**\n\n`;
+                summary += `📁 Project: ${result.projectPath}\n`;
+
+                if (result.spec) {
+                    summary += `📋 Spec: ${result.spec.displayName}\n`;
+                    summary += `🔧 Features: ${result.spec.features.join(', ')}\n`;
+                }
+
+                if (result.deployUrl) {
+                    summary += `\n🚀 Deployed: ${result.deployUrl}\n`;
+                }
+
+                if (result.todoItems.length > 0) {
+                    summary += `\n⚠️ TODO Items:\n${result.todoItems.map(t => `  - ${t}`).join('\n')}\n`;
+                }
+
+                return summary;
+            } else {
+                return `❌ App build failed: ${result.error || 'Unknown error'}`;
+            }
+        } catch (error: any) {
+            this.log(`App build error: ${error.message}`);
+            return `❌ App build failed: ${error.message}`;
         }
     }
 
