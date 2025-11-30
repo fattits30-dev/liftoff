@@ -3,6 +3,7 @@ import * as fs from 'fs/promises';
 import * as path from 'path';
 import { Agent } from './autonomousAgent';
 import { Artifact, AgentMessage } from './agentCommunication';
+import { validatePath } from './utils/pathValidator';
 
 export interface SessionHistory {
     id: string;
@@ -26,23 +27,26 @@ export interface AgentRecord {
 
 export class PersistenceManager {
     private historyDir: string;
+    private workspaceRoot: string;
     private currentSession: SessionHistory;
     private outputChannel: vscode.OutputChannel;
     private saveScheduled: boolean = false;
     private saveTimer: NodeJS.Timeout | null = null;
     private disposed: boolean = false;
-    
+
     constructor(context: vscode.ExtensionContext) {
         this.historyDir = path.join(context.globalStorageUri.fsPath, 'history');
+        this.workspaceRoot = context.globalStorageUri.fsPath;
         this.outputChannel = vscode.window.createOutputChannel('Liftoff Persistence');
         this.currentSession = this.createSession();
-        
+
         // Ensure directory exists asynchronously
         this.ensureHistoryDir();
     }
     
     private async ensureHistoryDir(): Promise<void> {
         try {
+            validatePath(this.historyDir, this.workspaceRoot);
             await fs.mkdir(this.historyDir, { recursive: true });
         } catch (err: any) {
             this.log(`Failed to create history directory: ${err.message}`);
@@ -116,9 +120,10 @@ export class PersistenceManager {
     
     private async saveCurrentSession(): Promise<void> {
         if (this.disposed) return;
-        
+
         try {
             const filePath = path.join(this.historyDir, `${this.currentSession.id}.json`);
+            validatePath(filePath, this.workspaceRoot);
             await fs.writeFile(filePath, JSON.stringify(this.currentSession, null, 2));
         } catch (err: any) {
             this.log(`Failed to save session: ${err.message}`);
@@ -133,20 +138,23 @@ export class PersistenceManager {
     
     async getSessionHistory(): Promise<SessionHistory[]> {
         try {
+            validatePath(this.historyDir, this.workspaceRoot);
             const files = await fs.readdir(this.historyDir);
             const sessions: SessionHistory[] = [];
-            
+
             for (const file of files) {
                 if (file.endsWith('.json')) {
                     try {
-                        const data = await fs.readFile(path.join(this.historyDir, file), 'utf-8');
+                        const filePath = path.join(this.historyDir, file);
+                        validatePath(filePath, this.workspaceRoot);
+                        const data = await fs.readFile(filePath, 'utf-8');
                         sessions.push(JSON.parse(data));
                     } catch {
                         // Skip corrupted files
                     }
                 }
             }
-            
+
             return sessions.sort((a, b) => b.startTime - a.startTime);
         } catch {
             return [];
@@ -163,6 +171,7 @@ export class PersistenceManager {
     async getSession(sessionId: string): Promise<SessionHistory | null> {
         try {
             const filePath = path.join(this.historyDir, `${sessionId}.json`);
+            validatePath(filePath, this.workspaceRoot);
             const data = await fs.readFile(filePath, 'utf-8');
             return JSON.parse(data);
         } catch {

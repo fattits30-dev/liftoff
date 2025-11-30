@@ -12,6 +12,7 @@ import {
     Entity
 } from './types';
 import { ArchitectureGenerator } from './architectureGenerator';
+import { validatePath } from '../utils/pathValidator';
 
 export interface TemplateVars {
     APP_NAME: string;
@@ -24,10 +25,12 @@ export interface TemplateVars {
 export class Scaffolder {
     private templateDir: string;
     private outputChannel: vscode.OutputChannel;
+    private workspaceRoot: string;
 
     constructor(extensionPath: string) {
         this.templateDir = path.join(extensionPath, 'src', 'appBuilder', 'templates');
         this.outputChannel = vscode.window.createOutputChannel('Liftoff Scaffolder');
+        this.workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || process.cwd();
     }
 
     /**
@@ -41,6 +44,7 @@ export class Scaffolder {
         this.log(`Scaffolding project: ${spec.name} at ${targetDir}`);
 
         // 1. Create target directory
+        validatePath(targetDir, this.workspaceRoot);
         if (!fs.existsSync(targetDir)) {
             fs.mkdirSync(targetDir, { recursive: true });
         }
@@ -108,6 +112,7 @@ export class Scaffolder {
      * Recursively copy directory
      */
     private async copyDir(source: string, target: string): Promise<void> {
+        validatePath(target, this.workspaceRoot);
         if (!fs.existsSync(target)) {
             fs.mkdirSync(target, { recursive: true });
         }
@@ -126,6 +131,7 @@ export class Scaffolder {
                 if (entry.name.endsWith('.tmpl')) {
                     finalTargetPath = targetPath.replace('.tmpl', '');
                 }
+                validatePath(finalTargetPath, this.workspaceRoot);
                 fs.copyFileSync(sourcePath, finalTargetPath);
             }
         }
@@ -158,6 +164,7 @@ export class Scaffolder {
             }
 
             if (modified) {
+                validatePath(filePath, this.workspaceRoot);
                 fs.writeFileSync(filePath, content);
             }
         };
@@ -182,6 +189,7 @@ export class Scaffolder {
      */
     private async generatePages(dir: string, pages: PageRoute[]): Promise<void> {
         const pagesDir = path.join(dir, 'src', 'pages');
+        validatePath(pagesDir, this.workspaceRoot);
         if (!fs.existsSync(pagesDir)) {
             fs.mkdirSync(pagesDir, { recursive: true });
         }
@@ -197,6 +205,7 @@ export class Scaffolder {
             if (fs.existsSync(filePath)) continue;
 
             const content = this.generatePageComponent(page);
+            validatePath(filePath, this.workspaceRoot);
             fs.writeFileSync(filePath, content);
         }
     }
@@ -373,11 +382,13 @@ export default function ${page.component}() {
      */
     private async generateDatabaseTypes(dir: string, entities: Entity[]): Promise<void> {
         const typesDir = path.join(dir, 'src', 'types');
+        validatePath(typesDir, this.workspaceRoot);
         if (!fs.existsSync(typesDir)) {
             fs.mkdirSync(typesDir, { recursive: true });
         }
 
         const filePath = path.join(typesDir, 'database.ts');
+        validatePath(filePath, this.workspaceRoot);
 
         let content = `// Auto-generated database types
 // Regenerate with: supabase gen types typescript
@@ -508,6 +519,7 @@ export type UpdateTables<T extends keyof Database['public']['Tables']> =
      */
     private async generateRouter(dir: string, pages: PageRoute[], hasAuth: boolean): Promise<void> {
         const appPath = path.join(dir, 'src', 'App.tsx');
+        validatePath(appPath, this.workspaceRoot);
 
         // Build imports
         const imports: string[] = [
@@ -554,12 +566,14 @@ export default App
      */
     private async writeMigration(dir: string, sql: string): Promise<void> {
         const migrationsDir = path.join(dir, 'supabase', 'migrations');
+        validatePath(migrationsDir, this.workspaceRoot);
         if (!fs.existsSync(migrationsDir)) {
             fs.mkdirSync(migrationsDir, { recursive: true });
         }
 
         const timestamp = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 14);
         const filePath = path.join(migrationsDir, `${timestamp}_init.sql`);
+        validatePath(filePath, this.workspaceRoot);
 
         fs.writeFileSync(filePath, sql);
     }
@@ -569,6 +583,7 @@ export default App
      */
     private async createEnvFile(dir: string, vars: TemplateVars): Promise<void> {
         const envPath = path.join(dir, '.env');
+        validatePath(envPath, this.workspaceRoot);
 
         let content = `# Supabase Configuration
 VITE_SUPABASE_URL=${vars.SUPABASE_URL || 'https://your-project.supabase.co'}

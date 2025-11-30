@@ -49,6 +49,10 @@
         "title": "Liftoff: Set HuggingFace API Key"
       },
       {
+        "command": "liftoff.testMcpTools",
+        "title": "Liftoff: Test MCP Tools"
+      },
+      {
         "command": "liftoff.initMcp",
         "title": "Liftoff: Initialize MCP Config"
       },
@@ -119,11 +123,6 @@
     "configuration": {
       "title": "Liftoff",
       "properties": {
-        "liftoff.huggingfaceApiKey": {
-          "type": "string",
-          "default": "",
-          "description": "Your HuggingFace API key (Pro recommended for best models)"
-        },
         "liftoff.defaultModel": {
           "type": "string",
           "default": "deepseek-ai/DeepSeek-V3-0324",
