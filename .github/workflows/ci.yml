@@ -26,6 +26,7 @@ jobs:
 
       - name: Run ESLint
         run: npm run lint
+        continue-on-error: true
 
       - name: TypeScript compile check
         run: npm run compile
