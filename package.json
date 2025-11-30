@@ -71,6 +71,10 @@
       {
         "command": "liftoff.deployApp",
         "title": "Liftoff: Deploy App"
+      },
+      {
+        "command": "liftoff.generateTests",
+        "title": "Liftoff: Generate Tests for This Project"
       }
     ],
     "viewsContainers": {
@@ -108,7 +112,8 @@
         { "command": "liftoff.buildApp" },
         { "command": "liftoff.resumeBuild" },
         { "command": "liftoff.addFeature" },
-        { "command": "liftoff.deployApp" }
+        { "command": "liftoff.deployApp" },
+        { "command": "liftoff.generateTests" }
       ]
     },
     "configuration": {

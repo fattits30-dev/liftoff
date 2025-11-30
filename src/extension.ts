@@ -510,6 +510,139 @@ This includes:
                     vscode.window.showErrorMessage(`Deployment failed: ${err.message}`);
                 }
             });
+        }),
+
+        // Test Generation Command - Works for BOTH new and existing apps
+        vscode.commands.registerCommand('liftoff.generateTests', async () => {
+            const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+            if (!workspaceRoot) {
+                vscode.window.showErrorMessage('No workspace folder open');
+                return;
+            }
+
+            vscode.window.withProgress({
+                location: vscode.ProgressLocation.Notification,
+                title: '🧪 Analyzing codebase and generating tests...',
+                cancellable: false
+            }, async (progress) => {
+                try {
+                    const { CodebaseAnalyzer } = require('./testing');
+                    const { TestGenerator } = require('./testing');
+                    const fs = require('fs');
+                    const path = require('path');
+
+                    // Step 1: Analyze codebase
+                    progress.report({ increment: 20, message: 'Scanning project structure...' });
+                    const analyzer = new CodebaseAnalyzer(workspaceRoot);
+                    const structure = await analyzer.analyze();
+
+                    // Show analysis report
+                    const report = analyzer.generateReport(structure);
+                    const reportDoc = await vscode.workspace.openTextDocument({
+                        content: report,
+                        language: 'markdown'
+                    });
+                    await vscode.window.showTextDocument(reportDoc, { viewColumn: vscode.ViewColumn.Beside });
+
+                    // Step 2: Ask user what to generate
+                    progress.report({ increment: 10, message: 'Waiting for user selection...' });
+                    const testType = await vscode.window.showQuickPick(
+                        [
+                            { label: '🎯 All Tests', description: 'Generate unit, E2E, and API tests', value: 'all' },
+                            { label: '📦 Unit Tests Only', description: 'Component and utility tests', value: 'unit' },
+                            { label: '🌐 E2E Tests Only', description: 'End-to-end user flow tests', value: 'e2e' },
+                            { label: '🔌 API Tests Only', description: 'API endpoint tests', value: 'api' }
+                        ],
+                        { placeHolder: 'What tests should I generate?' }
+                    );
+
+                    if (!testType) return;
+
+                    // Step 3: Generate tests
+                    progress.report({ increment: 30, message: 'Generating test files...' });
+                    const generator = new TestGenerator(structure.testing.framework || 'vitest');
+                    const allTests = generator.generateFromCodebase(structure);
+
+                    // Filter by type if needed
+                    let testsToWrite = allTests;
+                    if (testType.value !== 'all') {
+                        testsToWrite = allTests.filter((t: any) => t.type === testType.value);
+                    }
+
+                    // Step 4: Write test files
+                    progress.report({ increment: 30, message: `Writing ${testsToWrite.length} test files...` });
+                    let created = 0;
+                    let skipped = 0;
+
+                    for (const test of testsToWrite) {
+                        const testPath = path.join(workspaceRoot, test.filePath);
+                        const testDir = path.dirname(testPath);
+
+                        // Create directory if needed
+                        if (!fs.existsSync(testDir)) {
+                            fs.mkdirSync(testDir, { recursive: true });
+                        }
+
+                        // Check if file exists
+                        if (fs.existsSync(testPath)) {
+                            skipped++;
+                            continue;
+                        }
+
+                        // Write test file
+                        fs.writeFileSync(testPath, test.content, 'utf-8');
+                        created++;
+                    }
+
+                    // Step 5: Generate config files if needed
+                    if (!structure.testing.hasTests) {
+                        const configs = generator.generateTestConfig(structure.testing.framework || 'vitest');
+                        for (const config of configs) {
+                            const configPath = path.join(workspaceRoot, config.fileName);
+                            if (!fs.existsSync(configPath)) {
+                                fs.writeFileSync(configPath, config.content, 'utf-8');
+                            }
+                        }
+                    }
+
+                    progress.report({ increment: 10, message: 'Done!' });
+
+                    // Show summary
+                    const summary = [
+                        `✅ Test Generation Complete!`,
+                        ``,
+                        `📊 Summary:`,
+                        `  - Created: ${created} test files`,
+                        `  - Skipped: ${skipped} (already exist)`,
+                        `  - Coverage: ${structure.components.length} components, ${structure.apiEndpoints.length} endpoints`,
+                        ``,
+                        `🚀 Run tests with:`,
+                        structure.testing.framework === 'playwright' ? `  npm run e2e` : `  npm run test`
+                    ].join('\n');
+
+                    vscode.window.showInformationMessage(
+                        `Generated ${created} test files!`,
+                        'View Summary',
+                        'Run Tests'
+                    ).then(async (action) => {
+                        if (action === 'View Summary') {
+                            const doc = await vscode.workspace.openTextDocument({
+                                content: summary,
+                                language: 'markdown'
+                            });
+                            vscode.window.showTextDocument(doc);
+                        } else if (action === 'Run Tests') {
+                            const terminal = vscode.window.createTerminal('Liftoff Tests');
+                            terminal.show();
+                            terminal.sendText(structure.testing.framework === 'playwright' ? 'npm run e2e' : 'npm run test');
+                        }
+                    });
+
+                } catch (err: any) {
+                    vscode.window.showErrorMessage(`Test generation failed: ${err.message}`);
+                    console.error(err);
+                }
+            });
         })
     );
     
