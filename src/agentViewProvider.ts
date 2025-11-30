@@ -626,6 +626,22 @@ export class AgentViewProvider {
             const emptyState = console.querySelector('.empty-state');
             if (emptyState) emptyState.remove();
 
+            // For streaming thoughts, append to the last line if it's the same type
+            const lastLine = console.lastElementChild;
+            const isSameType = lastLine && lastLine.classList.contains('console-line') &&
+                               lastLine.classList.contains(msg.outputType || 'thought');
+
+            if (isSameType && (msg.outputType === 'thought' || !msg.outputType)) {
+                // Append to existing line
+                const content = lastLine.querySelector('.console-content');
+                if (content) {
+                    content.textContent += msg.content;
+                    console.scrollTop = console.scrollHeight;
+                    return;
+                }
+            }
+
+            // Create new line for different types or first message
             const line = document.createElement('div');
             line.className = 'console-line ' + (msg.outputType || 'thought');
 
