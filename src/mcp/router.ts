@@ -70,6 +70,13 @@ export class McpRouter {
      */
     async connectAll(configs: McpServerConfig[]): Promise<void> {
         const connectPromises = configs.map(async (config) => {
+            // Skip if already connected
+            const existingClient = this.clients.get(config.name);
+            if (existingClient && existingClient.status === 'ready') {
+                this.log(`${config.name} already connected, skipping`);
+                return;
+            }
+
             try {
                 const client = new McpClient(config);
                 await client.connect();
@@ -98,7 +105,7 @@ export class McpRouter {
     getToolsCompact(): string {
         const tools: string[] = [];
 
-        for (const [name, { server, tool }] of this.toolIndex) {
+        for (const [name, { server: _server, tool }] of this.toolIndex) {
             // Skip duplicates (prefixed versions)
             if (name.includes('__')) continue;
 
@@ -257,7 +264,6 @@ export class McpRouter {
     private log(message: string): void {
         const timestamp = new Date().toISOString();
         this.outputChannel.appendLine(`[${timestamp}] ${message}`);
-        console.log(`[McpRouter] ${message}`);
     }
 
     /**

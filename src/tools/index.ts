@@ -1,12 +1,45 @@
 // Core tools for autonomous agents
-import * as fs from 'fs';
+import * as fsPromises from 'fs/promises';
 import * as path from 'path';
-import { exec, spawn } from 'child_process';
+import { exec } from 'child_process';
 import { promisify } from 'util';
-import { canRead, canWrite, isWithinWorkspace } from './security';
-import { getLiftoffTerminal } from '../terminal';
 
 const execAsync = promisify(exec);
+
+// Async file existence check
+async function fileExists(filePath: string): Promise<boolean> {
+    try {
+        await fsPromises.access(filePath);
+        return true;
+    } catch {
+        return false;
+    }
+}
+
+// Inline security helpers
+function isWithinWorkspace(filePath: string, workspaceRoot: string): boolean {
+    const resolved = path.resolve(filePath);
+    const workspace = path.resolve(workspaceRoot);
+    return resolved.startsWith(workspace);
+}
+
+function canRead(filePath: string, _workspaceRoot: string): { allowed: boolean; reason?: string } {
+    const blocked = ['.env', '.env.local', 'credentials', 'secrets', '.git/config'];
+    const filename = path.basename(filePath).toLowerCase();
+    if (blocked.some(b => filename.includes(b))) {
+        return { allowed: false, reason: 'Sensitive file - read not allowed' };
+    }
+    return { allowed: true };
+}
+
+function canWrite(filePath: string, _workspaceRoot: string): { allowed: boolean; reason?: string } {
+    const blocked = ['.env', 'package-lock.json', 'yarn.lock', 'pnpm-lock.yaml'];
+    const filename = path.basename(filePath).toLowerCase();
+    if (blocked.some(b => filename === b)) {
+        return { allowed: false, reason: 'Protected file - write not allowed' };
+    }
+    return { allowed: true };
+}
 
 export interface ToolResult {
     success: boolean;
@@ -28,7 +61,6 @@ function parseTestOutput(output: string, exitCode: number, command?: string): To
     const success = exitCode === 0;
     const trimmedOutput = (output || '').trim();
     
-    // If no output captured, provide helpful debugging info
     if (!trimmedOutput) {
         return {
             success: false,
@@ -59,7 +91,6 @@ export const TOOLS: Record<string, Tool> = {
                 }
                 const filePath = path.resolve(workspaceRoot, params.path);
                 
-                // Security checks
                 if (!isWithinWorkspace(filePath, workspaceRoot)) {
                     return { success: false, output: '', error: 'Path outside workspace not allowed' };
                 }
@@ -68,9 +99,8 @@ export const TOOLS: Record<string, Tool> = {
                     return { success: false, output: '', error: readCheck.reason };
                 }
                 
-                let content = fs.readFileSync(filePath, 'utf-8');
+                let content = await fsPromises.readFile(filePath, 'utf-8');
                 
-                // Handle line range
                 if (params.lines) {
                     const [start, end] = params.lines.split('-').map(Number);
                     const lines = content.split('\n');
@@ -78,7 +108,6 @@ export const TOOLS: Record<string, Tool> = {
                     return { success: true, output: `Lines ${start}-${end}:\n${content}` };
                 }
                 
-                // Truncate if too long
                 if (content.length > 10000) {
                     content = content.substring(0, 10000) + '\n... (truncated, use lines parameter for specific sections)';
                 }
@@ -107,7 +136,6 @@ export const TOOLS: Record<string, Tool> = {
                 }
                 const filePath = path.resolve(workspaceRoot, params.path);
                 
-                // Security checks
                 if (!isWithinWorkspace(filePath, workspaceRoot)) {
                     return { success: false, output: '', error: 'Path outside workspace not allowed' };
                 }
@@ -116,15 +144,13 @@ export const TOOLS: Record<string, Tool> = {
                     return { success: false, output: '', error: writeCheck.reason };
                 }
                 
-                // Create directory if needed
                 const dir = path.dirname(filePath);
-                if (!fs.existsSync(dir)) {
-                    fs.mkdirSync(dir, { recursive: true });
+                if (!await fileExists(dir)) {
+                    await fsPromises.mkdir(dir, { recursive: true });
                 }
                 
-                fs.writeFileSync(filePath, params.content, 'utf-8');
-                const lines = params.content.split('\n').length;
-                return { success: true, output: `Wrote ${lines} lines to ${params.path}` };
+                await fsPromises.writeFile(filePath, params.content, 'utf-8');
+                return { success: true, output: `Written to ${params.path}` };
             } catch (e: any) {
                 return { success: false, output: '', error: e.message };
             }
@@ -133,216 +159,81 @@ export const TOOLS: Record<string, Tool> = {
 
     patch_file: {
         name: 'patch_file',
-        description: 'Apply a surgical edit to a file - find and replace specific text',
+        description: 'Apply a patch to modify specific parts of a file. Use this instead of write_file when editing existing files.',
         parameters: {
-            path: { type: 'string', description: 'File path', required: true },
-            find: { type: 'string', description: 'Exact text to find', required: true },
-            replace: { type: 'string', description: 'Text to replace with', required: true },
-            replace_all: { type: 'boolean', description: 'Replace ALL occurrences (default: false, requires unique match)' }
+            path: { type: 'string', description: 'File path relative to workspace', required: true },
+            search: { type: 'string', description: 'Exact text to find', required: true },
+            replace: { type: 'string', description: 'Text to replace with', required: true }
         },
         async execute(params, workspaceRoot) {
             try {
-                if (!params.path) {
-                    return { success: false, output: '', error: 'Missing required parameter: path' };
-                }
-                if (params.find === undefined || params.find === null) {
-                    return { success: false, output: '', error: 'Missing required parameter: find' };
-                }
-                if (params.replace === undefined || params.replace === null) {
-                    return { success: false, output: '', error: 'Missing required parameter: replace' };
+                if (!params.path || params.search === undefined || params.replace === undefined) {
+                    return { success: false, output: '', error: 'Missing required parameters' };
                 }
                 const filePath = path.resolve(workspaceRoot, params.path);
-
-                // Security checks
+                
                 if (!isWithinWorkspace(filePath, workspaceRoot)) {
-                    return { success: false, output: '', error: 'Path outside workspace' };
+                    return { success: false, output: '', error: 'Path outside workspace not allowed' };
                 }
                 const writeCheck = canWrite(filePath, workspaceRoot);
                 if (!writeCheck.allowed) {
                     return { success: false, output: '', error: writeCheck.reason };
                 }
-
-                let content = fs.readFileSync(filePath, 'utf-8');
-                const occurrences = content.split(params.find).length - 1;
-
-                if (occurrences === 0) {
-                    return { success: false, output: '', error: 'Text not found in file' };
+                
+                const content = await fsPromises.readFile(filePath, 'utf-8');
+                
+                if (!content.includes(params.search)) {
+                    return { success: false, output: '', error: `Search string not found in file. Make sure you're using the exact text.` };
                 }
-
-                // If multiple occurrences and replace_all not set, require unique match
-                if (occurrences > 1 && !params.replace_all) {
-                    return { success: false, output: '', error: `Text found ${occurrences} times - use replace_all: true to replace all, or add more context for unique match.` };
-                }
-
-                // Replace all occurrences or just the first one
-                if (params.replace_all) {
-                    content = content.split(params.find).join(params.replace);
-                } else {
-                    content = content.replace(params.find, params.replace);
-                }
-                fs.writeFileSync(filePath, content, 'utf-8');
-
-                return { success: true, output: `Patched ${params.path}: replaced ${params.replace_all ? occurrences : 1} occurrence(s)` };
+                
+                const newContent = content.replace(params.search, params.replace);
+                await fsPromises.writeFile(filePath, newContent, 'utf-8');
+                
+                return { success: true, output: `Patched ${params.path}` };
             } catch (e: any) {
                 return { success: false, output: '', error: e.message };
             }
         }
     },
 
-    list_files: {
-        name: 'list_files',
-        description: 'List files in a directory',
+    list_directory: {
+        name: 'list_directory',
+        description: 'List files and directories in a path',
         parameters: {
-            path: { type: 'string', description: 'Directory path (default: ".")', required: false },
-            recursive: { type: 'boolean', description: 'Include subdirectories' }
+            path: { type: 'string', description: 'Directory path relative to workspace', required: true },
+            recursive: { type: 'boolean', description: 'Include subdirectories (default: false)' }
         },
         async execute(params, workspaceRoot) {
             try {
                 const dirPath = path.resolve(workspaceRoot, params.path || '.');
-
+                
                 if (!isWithinWorkspace(dirPath, workspaceRoot)) {
-                    return { success: false, output: '', error: 'Path outside workspace' };
-                }
-
-                const entries = fs.readdirSync(dirPath, { withFileTypes: true });
-                const output = entries
-                    .filter(e => !e.name.startsWith('.') && e.name !== 'node_modules')
-                    .map(item => `${item.isDirectory() ? '[DIR]' : '[FILE]'} ${item.name}`)
-                    .join('\n');
-                return { success: true, output: output || 'Empty directory' };
-            } catch (e: any) {
-                return { success: false, output: '', error: e.message };
-            }
-        }
-    },
-
-    delete_file: {
-        name: 'delete_file',
-        description: 'Delete a file. SAFETY: Only works in tests/, __tests__/, test/ directories. Cannot delete source code.',
-        parameters: {
-            path: { type: 'string', description: 'File path relative to workspace', required: true },
-            confirm: { type: 'boolean', description: 'Must be true to confirm deletion', required: true }
-        },
-        async execute(params, workspaceRoot) {
-            try {
-                if (!params.path) {
-                    return { success: false, output: '', error: 'Missing required parameter: path' };
-                }
-                if (!params.confirm) {
-                    return { success: false, output: '', error: 'Must set confirm: true to delete files' };
-                }
-
-                const filePath = path.resolve(workspaceRoot, params.path);
-
-                // Security checks
-                if (!isWithinWorkspace(filePath, workspaceRoot)) {
                     return { success: false, output: '', error: 'Path outside workspace not allowed' };
                 }
-
-                // SAFETY: Only allow deletion in test directories
-                const relativePath = path.relative(workspaceRoot, filePath).replace(/\\/g, '/');
-                const allowedPatterns = [
-                    /^tests?\//i,
-                    /\/__tests__\//i,
-                    /\/tests?\//i,
-                    /^backend\/tests?\//i,
-                    /^frontend\/tests?\//i,
-                    /^__pycache__\//,
-                    /\/__pycache__\//,
-                    /^\.pytest_cache\//,
-                    /\/\.pytest_cache\//,
-                    /^node_modules\/\.cache\//
-                ];
-
-                const isAllowed = allowedPatterns.some(pattern => pattern.test(relativePath));
-                if (!isAllowed) {
-                    return {
-                        success: false,
-                        output: '',
-                        error: `SAFETY: Can only delete files in test directories (tests/, __tests__/, __pycache__, .pytest_cache). Path: ${relativePath}`
-                    };
-                }
-
-                // Check file exists
-                if (!fs.existsSync(filePath)) {
-                    return { success: false, output: '', error: `File not found: ${params.path}` };
-                }
-
-                // Delete the file
-                fs.unlinkSync(filePath);
-                return { success: true, output: `Deleted: ${params.path}` };
-            } catch (e: any) {
-                return { success: false, output: '', error: e.message };
-            }
-        }
-    },
-
-    search_files: {
-        name: 'search_files',
-        description: 'Search for text in files using regex or literal string',
-        parameters: {
-            pattern: { type: 'string', description: 'Search pattern (text or regex)', required: true },
-            path: { type: 'string', description: 'Directory to search (default: ".")' },
-            filePattern: { type: 'string', description: 'File glob like "*.ts" or "*.py"' },
-            regex: { type: 'boolean', description: 'Treat pattern as regex' }
-        },
-        async execute(params, workspaceRoot) {
-            try {
-                const searchPath = path.resolve(workspaceRoot, params.path || '.');
-                const results: string[] = [];
-                const maxResults = 50;
                 
-                function searchDir(dir: string) {
-                    if (results.length >= maxResults) return;
+                const entries = await fsPromises.readdir(dirPath, { withFileTypes: true });
+                const lines: string[] = [];
+                
+                for (const entry of entries) {
+                    if (entry.name.startsWith('.') || entry.name === 'node_modules') continue;
                     
-                    const entries = fs.readdirSync(dir, { withFileTypes: true });
-                    for (const entry of entries) {
-                        if (results.length >= maxResults) break;
-                        if (entry.name.startsWith('.') || entry.name === 'node_modules') continue;
-                        
-                        const fullPath = path.join(dir, entry.name);
-                        
-                        if (entry.isDirectory()) {
-                            searchDir(fullPath);
-                        } else if (entry.isFile()) {
-                            // Check file pattern
-                            if (params.filePattern) {
-                                const ext = params.filePattern.replace('*', '');
-                                if (!entry.name.endsWith(ext)) continue;
+                    const prefix = entry.isDirectory() ? '📁' : '📄';
+                    lines.push(`${prefix} ${entry.name}`);
+                    
+                    if (params.recursive && entry.isDirectory()) {
+                        try {
+                            const subEntries = await fsPromises.readdir(path.join(dirPath, entry.name));
+                            for (const sub of subEntries.slice(0, 10)) {
+                                lines.push(`  └─ ${sub}`);
                             }
-                            
-                            try {
-                                const content = fs.readFileSync(fullPath, 'utf-8');
-                                const lines = content.split('\n');
-                                const regex = params.regex 
-                                    ? new RegExp(params.pattern, 'gi')
-                                    : null;
-                                
-                                lines.forEach((line, i) => {
-                                    if (results.length >= maxResults) return;
-                                    const matches = regex 
-                                        ? regex.test(line)
-                                        : line.includes(params.pattern);
-                                    if (matches) {
-                                        const relPath = path.relative(workspaceRoot, fullPath);
-                                        results.push(`${relPath}:${i + 1}: ${line.trim().substring(0, 100)}`);
-                                    }
-                                });
-                            } catch { /* skip binary files */ }
-                        }
+                            if (subEntries.length > 10) {
+                                lines.push(`  └─ ... (${subEntries.length - 10} more)`);
+                            }
+                        } catch { /* ignore */ }
                     }
                 }
                 
-                searchDir(searchPath);
-                
-                if (results.length === 0) {
-                    return { success: true, output: 'No matches found' };
-                }
-                
-                return { 
-                    success: true, 
-                    output: `Found ${results.length}${results.length >= maxResults ? '+' : ''} matches:\n${results.join('\n')}` 
-                };
+                return { success: true, output: lines.join('\n') || '(empty directory)' };
             } catch (e: any) {
                 return { success: false, output: '', error: e.message };
             }
@@ -351,185 +242,224 @@ export const TOOLS: Record<string, Tool> = {
 
     run_command: {
         name: 'run_command',
-        description: 'Execute a shell command in VS Code terminal. Use for npm, python, git, etc. For running tests, use run_tests instead. Use "npx" for local node_modules binaries.',
+        description: 'Execute a shell command in the workspace',
         parameters: {
-            command: { type: 'string', description: 'Command to execute. Use "npx <tool>" for local packages, "npm run <script>" for package.json scripts.', required: true },
-            timeout: { type: 'number', description: 'Timeout in ms (default 60000)' }
+            command: { type: 'string', description: 'Command to run', required: true },
+            timeout: { type: 'number', description: 'Timeout in milliseconds (default: 30000)' }
         },
         async execute(params, workspaceRoot) {
-            if (!params.command) {
-                return { success: false, output: '', error: 'Missing required parameter: command' };
-            }
-            const timeout = params.timeout || 60000;
-
-            // Try VS Code terminal first
-            let terminalManager: ReturnType<typeof getLiftoffTerminal> | null = null;
             try {
-                terminalManager = getLiftoffTerminal();
-            } catch (initError: any) {
-                console.error('[run_command] Failed to get terminal manager:', initError);
-            }
-
-            if (terminalManager) {
-                try {
-                    const { output, exitCode } = await terminalManager.runCommand(
-                        params.command,
-                        workspaceRoot,
-                        timeout
-                    );
-                    return {
-                        success: exitCode === 0,
-                        output: output || 'Command completed with no output',
-                        error: exitCode !== 0 ? `Exit code: ${exitCode}` : undefined
-                    };
-                } catch (terminalError: any) {
-                    console.error('[run_command] Terminal execution failed:', terminalError);
-                    // Fall through to execAsync
+                if (!params.command) {
+                    return { success: false, output: '', error: 'Missing required parameter: command' };
                 }
-            }
-
-            // Fallback to execAsync
-            try {
+                
+                // Block dangerous commands
+                const dangerous = ['rm -rf /', 'format', 'mkfs', ':(){', 'dd if='];
+                if (dangerous.some(d => params.command.includes(d))) {
+                    return { success: false, output: '', error: 'Dangerous command blocked' };
+                }
+                
+                const timeout = params.timeout || 30000;
                 const { stdout, stderr } = await execAsync(params.command, {
                     cwd: workspaceRoot,
                     timeout,
-                    maxBuffer: 1024 * 1024 * 50,
-                    shell: process.platform === 'win32' ? 'powershell.exe' : '/bin/bash'
+                    maxBuffer: 1024 * 1024 * 10 // 10MB
                 });
-                return {
-                    success: true,
-                    output: stdout + (stderr ? `\nSTDERR:\n${stderr}` : '')
-                };
+                
+                const output = stdout + (stderr ? `\n[stderr]: ${stderr}` : '');
+                return { success: true, output: output.trim() || '(no output)' };
             } catch (e: any) {
-                return {
-                    success: false,
-                    output: e.stdout || '',
-                    error: e.stderr || e.message || 'Command execution failed'
+                // Include both error message and any output
+                const output = e.stdout || '';
+                const stderr = e.stderr || '';
+                return { 
+                    success: false, 
+                    output: output + (stderr ? `\n[stderr]: ${stderr}` : ''),
+                    error: e.message 
                 };
+            }
+        }
+    },
+
+    search_files: {
+        name: 'search_files',
+        description: 'Search for text pattern in files',
+        parameters: {
+            pattern: { type: 'string', description: 'Text or regex to search', required: true },
+            path: { type: 'string', description: 'Directory to search (default: workspace root)' },
+            filePattern: { type: 'string', description: 'File glob pattern (e.g., "*.ts")' }
+        },
+        async execute(params, workspaceRoot) {
+            try {
+                if (!params.pattern) {
+                    return { success: false, output: '', error: 'Missing required parameter: pattern' };
+                }
+                
+                const searchDir = path.resolve(workspaceRoot, params.path || '.');
+                if (!isWithinWorkspace(searchDir, workspaceRoot)) {
+                    return { success: false, output: '', error: 'Path outside workspace not allowed' };
+                }
+                
+                const results: string[] = [];
+                const regex = new RegExp(params.pattern, 'gi');
+                
+                async function walkDir(dir: string, depth: number = 0): Promise<void> {
+                    if (depth > 5) return;
+                    
+                    try {
+                        const entries = await fsPromises.readdir(dir, { withFileTypes: true });
+                        
+                        for (const entry of entries) {
+                            if (entry.name.startsWith('.') || entry.name === 'node_modules') continue;
+                            
+                            const fullPath = path.join(dir, entry.name);
+                            
+                            if (entry.isDirectory()) {
+                                await walkDir(fullPath, depth + 1);
+                            } else if (entry.isFile()) {
+                                if (params.filePattern && !entry.name.match(params.filePattern.replace('*', '.*'))) continue;
+                                
+                                try {
+                                    const content = await fsPromises.readFile(fullPath, 'utf-8');
+                                    const lines = content.split('\n');
+                                    
+                                    lines.forEach((line, i) => {
+                                        if (regex.test(line)) {
+                                            const relPath = path.relative(workspaceRoot, fullPath);
+                                            results.push(`${relPath}:${i + 1}: ${line.trim().substring(0, 100)}`);
+                                        }
+                                    });
+                                } catch { /* skip binary files */ }
+                            }
+                        }
+                    } catch { /* ignore permission errors */ }
+                }
+                
+                await walkDir(searchDir);;
+                
+                if (results.length === 0) {
+                    return { success: true, output: 'No matches found' };
+                }
+                
+                return { success: true, output: results.slice(0, 50).join('\n') + (results.length > 50 ? `\n... (${results.length - 50} more)` : '') };
+            } catch (e: any) {
+                return { success: false, output: '', error: e.message };
+            }
+        }
+    },
+
+    delete_file: {
+        name: 'delete_file',
+        description: 'Delete a file',
+        parameters: {
+            path: { type: 'string', description: 'File path relative to workspace', required: true }
+        },
+        async execute(params, workspaceRoot) {
+            try {
+                if (!params.path) {
+                    return { success: false, output: '', error: 'Missing required parameter: path' };
+                }
+                const filePath = path.resolve(workspaceRoot, params.path);
+                
+                if (!isWithinWorkspace(filePath, workspaceRoot)) {
+                    return { success: false, output: '', error: 'Path outside workspace not allowed' };
+                }
+                const writeCheck = canWrite(filePath, workspaceRoot);
+                if (!writeCheck.allowed) {
+                    return { success: false, output: '', error: writeCheck.reason };
+                }
+                
+                await fsPromises.unlink(filePath);
+                return { success: true, output: `Deleted ${params.path}` };
+            } catch (e: any) {
+                return { success: false, output: '', error: e.message };
             }
         }
     },
 
     run_tests: {
         name: 'run_tests',
-        description: 'Run test suite in VS Code terminal. For vitest: use "npx vitest run". For pytest: use "python -m pytest -v --tb=short" (shows verbose output with traceback).',
+        description: 'Run tests in the project. Auto-detects test framework.',
         parameters: {
-            command: { type: 'string', description: 'Test command. Examples: "npm test", "npx vitest run", "python -m pytest tests/ -v --tb=short". For pytest ALWAYS use -v and --tb=short for visible errors!', required: true },
-            timeout: { type: 'number', description: 'Timeout in ms (default 180000 for tests - 3 minutes)' }
+            path: { type: 'string', description: 'Test file or directory (optional)' },
+            pattern: { type: 'string', description: 'Test name pattern to match (optional)' }
         },
         async execute(params, workspaceRoot) {
-            if (!params.command) {
-                return { success: false, output: '', error: 'Missing required parameter: command' };
-            }
-            const timeout = params.timeout || 180000; // 3 minutes for tests
-
-            // Try VS Code terminal first (best output visibility)
-            let terminalManager: ReturnType<typeof getLiftoffTerminal> | null = null;
             try {
-                terminalManager = getLiftoffTerminal();
-            } catch (initError: any) {
-                console.error('[run_tests] Failed to get terminal manager:', initError);
-            }
-
-            if (terminalManager) {
+                // Detect test framework
+                let command = '';
+                let framework = '';
+                
+                if (await fileExists(path.join(workspaceRoot, 'package.json'))) {
+                    const pkgContent = await fsPromises.readFile(path.join(workspaceRoot, 'package.json'), 'utf-8');
+                    const pkg = JSON.parse(pkgContent);
+                    const deps = { ...pkg.dependencies, ...pkg.devDependencies };
+                    
+                    if (deps['vitest']) {
+                        framework = 'vitest';
+                        command = 'npx vitest run --reporter=verbose';
+                    } else if (deps['jest']) {
+                        framework = 'jest';
+                        command = 'npx jest --verbose';
+                    } else if (deps['mocha']) {
+                        framework = 'mocha';
+                        command = 'npx mocha';
+                    } else if (deps['playwright']) {
+                        framework = 'playwright';
+                        command = 'npx playwright test';
+                    }
+                }
+                
+                if (!command && await fileExists(path.join(workspaceRoot, 'pytest.ini')) || 
+                    await fileExists(path.join(workspaceRoot, 'setup.py')) ||
+                    await fileExists(path.join(workspaceRoot, 'pyproject.toml'))) {
+                    framework = 'pytest';
+                    command = 'python -m pytest -v --tb=short';
+                }
+                
+                if (!command) {
+                    return { success: false, output: '', error: 'Could not detect test framework. Supported: vitest, jest, mocha, playwright, pytest' };
+                }
+                
+                if (params.path) {
+                    command += ` ${params.path}`;
+                }
+                if (params.pattern) {
+                    if (framework === 'pytest') {
+                        command += ` -k "${params.pattern}"`;
+                    } else if (framework === 'vitest' || framework === 'jest') {
+                        command += ` -t "${params.pattern}"`;
+                    }
+                }
+                
                 try {
-                    const { output, exitCode } = await terminalManager.runCommand(
-                        params.command,
-                        workspaceRoot,
-                        timeout
-                    );
-                    return parseTestOutput(output, exitCode, params.command);
-                } catch (terminalError: any) {
-                    console.error('[run_tests] Terminal execution failed:', terminalError);
-                    // Fall through to execAsync
+                    const { stdout, stderr } = await execAsync(command, {
+                        cwd: workspaceRoot,
+                        timeout: 120000,
+                        maxBuffer: 1024 * 1024 * 10
+                    });
+                    return parseTestOutput(stdout + stderr, 0, command);
+                } catch (e: any) {
+                    return parseTestOutput((e.stdout || '') + (e.stderr || ''), e.code || 1, command);
                 }
+            } catch (e: any) {
+                return { success: false, output: '', error: e.message };
             }
-
-            // Fallback to execAsync with improved capture
-            try {
-                // For pytest, ensure unbuffered output
-                const enhancedEnv = {
-                    ...process.env,
-                    FORCE_COLOR: '0',
-                    NO_COLOR: '1',
-                    CI: '1',
-                    PYTHONUNBUFFERED: '1', // Force unbuffered Python output
-                    PYTEST_ADDOPTS: '-v --tb=short' // Ensure pytest verbosity
-                };
-
-                const { stdout, stderr } = await execAsync(params.command, {
-                    cwd: workspaceRoot,
-                    timeout,
-                    maxBuffer: 1024 * 1024 * 100,
-                    shell: process.platform === 'win32' ? 'powershell.exe' : '/bin/bash',
-                    env: enhancedEnv,
-                    windowsHide: true,
-                });
-
-                // Combine stdout and stderr - pytest often writes to stderr
-                const fullOutput = [stdout, stderr].filter(Boolean).join('\n');
-                return parseTestOutput(fullOutput, 0, params.command);
-
-            } catch (err: any) {
-                const stdout = err.stdout || '';
-                const stderr = err.stderr || '';
-                // Combine all output - pytest errors go to stderr
-                const fullOutput = [stdout, stderr].filter(Boolean).join('\n');
-                const exitCode = err.code || 1;
-
-                if (!fullOutput.trim()) {
-                    // More helpful error when no output captured
-                    return {
-                        success: false,
-                        output: `Command failed with no visible output.
-Command: ${params.command}
-Working directory: ${workspaceRoot}
-Exit code: ${exitCode}
-Error: ${err.message}
-
-TIP: For pytest, use "python -m pytest tests/ -v --tb=short" to see detailed errors.
-TIP: For vitest, use "npx vitest run" instead of bare "vitest".`,
-                        error: err.message || `Exit code ${exitCode}`
-                    };
-                }
-
-                return parseTestOutput(fullOutput, exitCode, params.command);
-            }
-        }
-    },
-
-    task_complete: {
-        name: 'task_complete',
-        description: 'Signal that the task is complete with a summary',
-        parameters: {
-            summary: { type: 'string', description: 'Summary of what was done', required: true },
-            success: { type: 'boolean', description: 'Whether task succeeded' }
-        },
-        async execute(params) {
-            return { success: true, output: `TASK_COMPLETE: ${params.summary}` };
-        }
-    },
-
-    ask_user: {
-        name: 'ask_user',
-        description: 'Ask the user a question and wait for their response',
-        parameters: {
-            question: { type: 'string', description: 'Question to ask', required: true }
-        },
-        async execute(params) {
-            return { success: true, output: `WAITING_FOR_USER: ${params.question}` };
         }
     }
 };
 
-export function getToolsDescription(): string {
-    return Object.values(TOOLS).map(tool => {
-        const params = Object.entries(tool.parameters)
-            .map(([name, p]) => `  - ${name}${p.required ? '*' : ''}: ${p.description}`)
-            .join('\n');
-        return `## ${tool.name}\n${tool.description}\n${params}`;
-    }).join('\n\n');
+// Re-export VS Code tools
+export { VSCODE_TOOLS } from './vscode';
+
+// Export tool list for discovery
+export function getToolList(): string[] {
+    return Object.keys(TOOLS);
 }
 
-// Export VS Code tools
-export { VSCODE_TOOLS, getVSCodeToolsDescription } from './vscode';
+// Export tool descriptions for prompts
+export function getToolDescriptions(): string {
+    return Object.values(TOOLS).map(t => 
+        `- ${t.name}: ${t.description}\n  Parameters: ${Object.entries(t.parameters).map(([k, v]) => `${k} (${v.type}${v.required ? ', required' : ''})`).join(', ')}`
+    ).join('\n\n');
+}

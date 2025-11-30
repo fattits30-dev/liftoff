@@ -1,22 +1,63 @@
 import * as vscode from 'vscode';
-import { AutonomousAgentManager, AgentType } from './autonomousAgent';
+import * as path from 'path';
+import { AutonomousAgentManager } from './autonomousAgent';
 import { ManagerViewProvider } from './managerViewProvider';
 import { ArtifactViewerProvider } from './artifactViewerProvider';
 import { LiftoffEditorPanel } from './liftoffEditorPanel';
 import { PersistenceManager } from './persistence';
-import { Orchestrator } from './orchestrator';
+import { MainOrchestrator } from './mainOrchestrator';
+import { SemanticMemoryStore, OrchestratorMemory } from './memory/agentMemory';
+import { AgentType } from './types/agentTypes';
+import { AppBuilderOrchestrator, hasBuildState, loadBuildState } from './appBuilder';
 
 let agentManager: AutonomousAgentManager;
-let orchestrator: Orchestrator;
+let orchestrator: MainOrchestrator;
+let appBuilder: AppBuilderOrchestrator;
 let persistenceManager: PersistenceManager;
+let semanticMemory: SemanticMemoryStore;
+let orchestratorMemory: OrchestratorMemory;
 let statusBarItem: vscode.StatusBarItem;
+let outputChannel: vscode.OutputChannel;
 
-export function activate(context: vscode.ExtensionContext) {
-    console.log('🚀 Liftoff is now active!');
+function log(message: string): void {
+    outputChannel?.appendLine(`[Liftoff] ${new Date().toISOString()} - ${message}`);
+}
+
+export async function activate(context: vscode.ExtensionContext) {
+    outputChannel = vscode.window.createOutputChannel('Liftoff Extension');
+    context.subscriptions.push(outputChannel);
     
-    agentManager = new AutonomousAgentManager(context);
-    orchestrator = new Orchestrator(agentManager);
-    persistenceManager = new PersistenceManager(context);
+    log('🚀 Liftoff is activating...');
+
+    try {
+        const memoryPath = path.join(context.globalStorageUri.fsPath, 'memory');
+        semanticMemory = new SemanticMemoryStore(path.join(memoryPath, 'semantic.json'));
+        orchestratorMemory = new OrchestratorMemory(path.join(memoryPath, 'orchestrator.json'), semanticMemory);
+        
+        await Promise.all([
+            semanticMemory.initialize(),
+            orchestratorMemory.initialize()
+        ]);
+
+        agentManager = new AutonomousAgentManager(context, semanticMemory);
+        
+        const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || process.cwd();
+        orchestrator = new MainOrchestrator(workspaceRoot, semanticMemory, orchestratorMemory);
+        
+        // Wire orchestrator to agent manager for delegation
+        orchestrator.setAgentManager(agentManager);
+
+        // Initialize app builder
+        appBuilder = new AppBuilderOrchestrator(context.extensionPath, orchestrator);
+
+        persistenceManager = new PersistenceManager(context);
+
+        log('Core components initialized');
+    } catch (err: any) {
+        log(`Failed to initialize: ${err.message}`);
+        vscode.window.showErrorMessage(`Liftoff failed to initialize: ${err.message}`);
+        return;
+    }
     
     // Status bar
     statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
@@ -27,27 +68,26 @@ export function activate(context: vscode.ExtensionContext) {
     
     agentManager.onAgentUpdate(() => {
         const running = agentManager.getRunningAgents().length;
-        const mode = agentManager.getExecutionMode();
-        const modeIcon = mode === 'local' ? '🏠' : mode === 'hybrid' ? '🔀' : '☁️';
         statusBarItem.text = running > 0 
-            ? `$(rocket) Liftoff ${modeIcon} (${running} active)`
-            : `$(rocket) Liftoff ${modeIcon}`;
+            ? `$(rocket) Liftoff ☁️ (${running} active)`
+            : '$(rocket) Liftoff ☁️';
     });
-    
-    // Webview providers
-    const managerProvider = new ManagerViewProvider(context.extensionUri, agentManager as any);
-    const artifactProvider = new ArtifactViewerProvider(context.extensionUri, agentManager as any);
+
+    // Webview providers - MUST push providers themselves to subscriptions for proper cleanup
+    const managerProvider = new ManagerViewProvider(context.extensionUri, agentManager);
+    const artifactProvider = new ArtifactViewerProvider(context.extensionUri, agentManager);
     
     context.subscriptions.push(
         vscode.window.registerWebviewViewProvider('liftoff.managerView', managerProvider),
-        vscode.window.registerWebviewViewProvider('liftoff.artifactView', artifactProvider)
+        vscode.window.registerWebviewViewProvider('liftoff.artifactView', artifactProvider),
+        managerProvider,  // Provider instance for internal cleanup
+        artifactProvider  // Provider instance for internal cleanup
     );
     
     // Commands
     context.subscriptions.push(
         vscode.commands.registerCommand('liftoff.openManager', () => {
-            // Open full editor panel instead of sidebar
-            LiftoffEditorPanel.createOrShow(context.extensionUri, agentManager);
+            LiftoffEditorPanel.createOrShow(context.extensionUri, agentManager, orchestrator);
         }),
 
         vscode.commands.registerCommand('liftoff.openSidebar', () => {
@@ -56,7 +96,7 @@ export function activate(context: vscode.ExtensionContext) {
         
         vscode.commands.registerCommand('liftoff.setApiKey', async () => {
             const apiKey = await vscode.window.showInputBox({
-                prompt: 'Enter your HuggingFace API key (Pro recommended for best models)',
+                prompt: 'Enter your HuggingFace API key (Pro recommended)',
                 password: true,
                 placeHolder: 'hf_...'
             });
@@ -82,9 +122,9 @@ export function activate(context: vscode.ExtensionContext) {
                 { label: '🎨 Frontend', description: 'Edit React/Vue/CSS, run builds', value: 'frontend' as AgentType },
                 { label: '⚙️ Backend', description: 'Modify APIs, databases, server code', value: 'backend' as AgentType },
                 { label: '🧪 Testing', description: 'Run tests, analyze failures', value: 'testing' as AgentType },
-                { label: '🌐 Browser', description: 'Control browser, test UI like a human', value: 'browser' as AgentType },
-                { label: '🧹 Cleaner', description: 'Remove broken tests, dead code, cleanup', value: 'cleaner' as AgentType },
-                { label: '🔧 General', description: 'General development tasks', value: 'general' as AgentType }
+                { label: '🌐 Browser', description: 'Control browser, test UI', value: 'browser' as AgentType },
+                { label: '🧹 Cleaner', description: 'Remove dead code, cleanup', value: 'cleaner' as AgentType },
+                { label: '🔧 General', description: 'General dev tasks', value: 'general' as AgentType }
             ];
             
             const selected = await vscode.window.showQuickPick(types, { placeHolder: 'Select agent type' });
@@ -134,7 +174,7 @@ export function activate(context: vscode.ExtensionContext) {
         }),
 
         vscode.commands.registerCommand('liftoff.viewHistory', async () => {
-            const sessions = persistenceManager.getAllSessions();
+            const sessions = await persistenceManager.getSessionHistory();
             if (sessions.length === 0) {
                 vscode.window.showInformationMessage('No history');
                 return;
@@ -147,7 +187,7 @@ export function activate(context: vscode.ExtensionContext) {
             }));
             const sel = await vscode.window.showQuickPick(opts);
             if (sel) {
-                const session = persistenceManager.getSession(sel.sessionId);
+                const session = await persistenceManager.getSession(sel.sessionId);
                 if (session) {
                     const doc = await vscode.workspace.openTextDocument({
                         content: JSON.stringify(session, null, 2),
@@ -162,6 +202,7 @@ export function activate(context: vscode.ExtensionContext) {
             agentManager.showOutput();
         }),
 
+
         vscode.commands.registerCommand('liftoff.initMcp', async () => {
             const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
             if (!workspaceRoot) {
@@ -170,7 +211,6 @@ export function activate(context: vscode.ExtensionContext) {
             }
 
             const fs = require('fs');
-            const path = require('path');
             const configPath = path.join(workspaceRoot, '.mcp.json');
 
             if (fs.existsSync(configPath)) {
@@ -203,115 +243,19 @@ export function activate(context: vscode.ExtensionContext) {
                         "command": "npx",
                         "args": ["-y", "@modelcontextprotocol/server-fetch"],
                         "enabled": true
-                    },
-                    "puppeteer": {
-                        "command": "npx",
-                        "args": ["-y", "@modelcontextprotocol/server-puppeteer"],
-                        "enabled": true
-                    },
-                    "sequential-thinking": {
-                        "command": "npx",
-                        "args": ["-y", "@modelcontextprotocol/server-sequential-thinking"],
-                        "enabled": true
                     }
                 }
             };
 
             fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
             vscode.window.showInformationMessage(
-                '✅ Created .mcp.json with filesystem server. Reload window to connect.',
+                '✅ Created .mcp.json. Reload window to connect.',
                 'Reload'
             ).then(action => {
                 if (action === 'Reload') {
                     vscode.commands.executeCommand('workbench.action.reloadWindow');
                 }
             });
-        }),
-
-        vscode.commands.registerCommand('liftoff.configureOllama', async () => {
-            const config = vscode.workspace.getConfiguration('liftoff');
-            
-            // Select execution mode
-            const modes = [
-                { label: '☁️ Cloud Only', description: 'Use HuggingFace for all inference', value: 'cloud' },
-                { label: '🏠 Local Only', description: 'Use Ollama for all inference (requires local setup)', value: 'local' },
-                { label: '🔀 Hybrid', description: 'Cloud brain + local muscle (recommended)', value: 'hybrid' }
-            ];
-            
-            const selectedMode = await vscode.window.showQuickPick(modes, {
-                placeHolder: 'Select execution mode'
-            });
-            if (!selectedMode) return;
-            
-            await config.update('executionMode', selectedMode.value, true);
-            agentManager.setExecutionMode(selectedMode.value as any);
-            
-            if (selectedMode.value !== 'cloud') {
-                // Configure Ollama URL
-                const url = await vscode.window.showInputBox({
-                    prompt: 'Ollama URL',
-                    value: config.get('ollamaUrl') || 'http://localhost:11434',
-                    placeHolder: 'http://localhost:11434'
-                });
-                if (url) {
-                    await config.update('ollamaUrl', url, true);
-                }
-                
-                // Select local model
-                const models = [
-                    { label: 'devstral:latest', description: 'Mistral coding model (recommended)' },
-                    { label: 'qwen2.5-coder:7b-instruct', description: 'Fast, fits in 8GB VRAM' },
-                    { label: 'qwen2.5-coder:14b-instruct', description: 'Good balance' },
-                    { label: 'qwen2.5-coder:32b-instruct', description: 'Best quality (needs high VRAM)' },
-                    { label: 'codellama:13b-instruct', description: 'Meta CodeLlama' },
-                    { label: 'deepseek-coder-v2:latest', description: 'DeepSeek coder' }
-                ];
-                
-                const selectedModel = await vscode.window.showQuickPick(models, {
-                    placeHolder: 'Select local model'
-                });
-                if (selectedModel) {
-                    await config.update('ollamaModel', selectedModel.label, true);
-                }
-                
-                // Test connection
-                const available = await agentManager.configureLocal({
-                    url: url || config.get('ollamaUrl'),
-                    model: selectedModel?.label || config.get('ollamaModel')
-                });
-                
-                if (available) {
-                    vscode.window.showInformationMessage(`✅ Ollama configured! Mode: ${selectedMode.value}`);
-                } else {
-                    vscode.window.showWarningMessage(
-                        '⚠️ Ollama not reachable. Make sure it\'s running: ollama serve',
-                        'Check Status'
-                    ).then(action => {
-                        if (action) vscode.commands.executeCommand('liftoff.checkLocalStatus');
-                    });
-                }
-            } else {
-                vscode.window.showInformationMessage('☁️ Cloud-only mode enabled');
-            }
-        }),
-
-        vscode.commands.registerCommand('liftoff.checkLocalStatus', async () => {
-            const available = await agentManager.isLocalAvailable();
-            const stats = agentManager.getHybridStats();
-            
-            if (available) {
-                const models = await agentManager.listLocalModels();
-                const modelList = models.length > 0 ? models.slice(0, 5).join(', ') : 'None found';
-                
-                vscode.window.showInformationMessage(
-                    `✅ Ollama Status: Available | Models: ${modelList} | ` +
-                    `Local calls: ${stats.localCallsThisHour} | Latency: ${stats.averageLocalLatency.toFixed(0)}ms`
-                );
-            } else {
-                vscode.window.showErrorMessage(
-                    '❌ Ollama not available. Start it with: ollama serve'
-                );
-            }
         }),
 
         vscode.commands.registerCommand('liftoff.orchestratorChat', async () => {
@@ -324,7 +268,6 @@ export function activate(context: vscode.ExtensionContext) {
                 return;
             }
 
-            // Simple input-based chat for now
             const task = await vscode.window.showInputBox({
                 prompt: '🧠 Orchestrator: What would you like me to do?',
                 placeHolder: 'e.g., Run the tests and fix any failures',
@@ -338,15 +281,12 @@ export function activate(context: vscode.ExtensionContext) {
                 title: '🧠 Orchestrator working...',
                 cancellable: false
             }, async (progress) => {
-                progress.report({ message: 'Planning task...' });
+                progress.report({ message: 'Processing task...' });
                 
                 try {
                     const response = await orchestrator.chat(task);
-                    
-                    // Show result in output channel
                     orchestrator.showOutput();
                     
-                    // Also show a summary notification
                     const lines = response.split('\n').filter(l => l.trim());
                     const summary = lines.slice(0, 3).join(' | ');
                     vscode.window.showInformationMessage(
@@ -359,33 +299,245 @@ export function activate(context: vscode.ExtensionContext) {
                     vscode.window.showErrorMessage(`Orchestrator error: ${err.message}`);
                 }
             });
+        }),
+
+        // App Builder Commands
+        vscode.commands.registerCommand('liftoff.buildApp', async () => {
+            const config = vscode.workspace.getConfiguration('liftoff');
+            if (!config.get<string>('huggingfaceApiKey')) {
+                const action = await vscode.window.showErrorMessage(
+                    'HuggingFace API key not set!', 'Set Key'
+                );
+                if (action) vscode.commands.executeCommand('liftoff.setApiKey');
+                return;
+            }
+
+            const description = await vscode.window.showInputBox({
+                prompt: '🏗️ Describe the app you want to build',
+                placeHolder: 'A project management app with teams, tasks, and deadlines',
+                ignoreFocusOut: true
+            });
+
+            if (!description) return;
+
+            const targetFolder = await vscode.window.showOpenDialog({
+                canSelectFolders: true,
+                canSelectFiles: false,
+                canSelectMany: false,
+                openLabel: 'Select Project Location',
+                title: 'Where should we create the project?'
+            });
+
+            if (!targetFolder || targetFolder.length === 0) return;
+
+            const appName = await vscode.window.showInputBox({
+                prompt: 'Project folder name (lowercase, no spaces)',
+                placeHolder: 'my-app',
+                validateInput: (value) => {
+                    if (!/^[a-z][a-z0-9-]*$/.test(value)) {
+                        return 'Must be lowercase, start with letter, only letters/numbers/hyphens';
+                    }
+                    return null;
+                }
+            });
+
+            if (!appName) return;
+
+            const targetDir = path.join(targetFolder[0].fsPath, appName);
+
+            log(`Building app: ${description} at ${targetDir}`);
+
+            try {
+                const result = await appBuilder.buildApp(description, targetDir);
+
+                if (result.success) {
+                    const action = await vscode.window.showInformationMessage(
+                        `✅ App "${result.spec?.displayName}" created successfully!`,
+                        'Open Folder',
+                        'View TODO'
+                    );
+
+                    if (action === 'Open Folder') {
+                        vscode.commands.executeCommand('vscode.openFolder', vscode.Uri.file(targetDir));
+                    } else if (action === 'View TODO' && result.todoItems.length > 0) {
+                        const doc = await vscode.workspace.openTextDocument({
+                            content: result.todoItems.join('\n'),
+                            language: 'markdown'
+                        });
+                        vscode.window.showTextDocument(doc);
+                    }
+                } else {
+                    vscode.window.showErrorMessage(`Build failed: ${result.error}`);
+                }
+            } catch (err: any) {
+                vscode.window.showErrorMessage(`Build failed: ${err.message}`);
+            }
+        }),
+
+        vscode.commands.registerCommand('liftoff.resumeBuild', async () => {
+            const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+            if (!workspaceRoot) {
+                vscode.window.showErrorMessage('No workspace folder open');
+                return;
+            }
+
+            if (!hasBuildState(workspaceRoot)) {
+                vscode.window.showInformationMessage('No interrupted build found in this workspace');
+                return;
+            }
+
+            const state = await loadBuildState(workspaceRoot);
+            if (!state) return;
+
+            const resume = await vscode.window.showQuickPick(
+                ['Yes, resume build', 'No, start fresh'],
+                {
+                    placeHolder: `Found interrupted build at "${state.phase}" phase. Resume?`
+                }
+            );
+
+            if (resume === 'Yes, resume build') {
+                try {
+                    const result = await appBuilder.resumeBuild(workspaceRoot);
+                    if (result.success) {
+                        vscode.window.showInformationMessage('Build resumed and completed!');
+                    } else {
+                        vscode.window.showErrorMessage(`Resume failed: ${result.error}`);
+                    }
+                } catch (err: any) {
+                    vscode.window.showErrorMessage(`Resume failed: ${err.message}`);
+                }
+            }
+        }),
+
+        vscode.commands.registerCommand('liftoff.addFeature', async () => {
+            const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+            if (!workspaceRoot) {
+                vscode.window.showErrorMessage('No workspace folder open');
+                return;
+            }
+
+            const features = [
+                { label: '🔐 Auth', description: 'Add user authentication', value: 'auth' },
+                { label: '📁 File Upload', description: 'Add file/image uploads', value: 'file-upload' },
+                { label: '💳 Payments', description: 'Add Stripe payments', value: 'payments' },
+                { label: '⚡ Realtime', description: 'Add realtime updates', value: 'realtime' },
+                { label: '🔍 Search', description: 'Add full-text search', value: 'search' },
+                { label: '👑 Admin', description: 'Add admin dashboard', value: 'admin' },
+                { label: '🔗 Social Auth', description: 'Add Google/GitHub login', value: 'social-auth' },
+                { label: '🛡️ RBAC', description: 'Add role-based access', value: 'rbac' }
+            ];
+
+            const selected = await vscode.window.showQuickPick(features, {
+                placeHolder: 'Select feature to add',
+                title: 'Add Feature'
+            });
+
+            if (!selected) return;
+
+            // Use orchestrator to implement the feature
+            const task = `Add ${selected.label} feature to this project.
+This includes:
+- Creating necessary components
+- Setting up required hooks
+- Adding any needed database tables
+- Integrating with existing code`;
+
+            vscode.window.withProgress({
+                location: vscode.ProgressLocation.Notification,
+                title: `Adding ${selected.label} feature...`,
+                cancellable: false
+            }, async () => {
+                try {
+                    await orchestrator.chat(task);
+                    vscode.window.showInformationMessage(`✅ ${selected.label} feature added!`);
+                } catch (err: any) {
+                    vscode.window.showErrorMessage(`Failed to add feature: ${err.message}`);
+                }
+            });
+        }),
+
+        vscode.commands.registerCommand('liftoff.deployApp', async () => {
+            const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+            if (!workspaceRoot) {
+                vscode.window.showErrorMessage('No workspace folder open');
+                return;
+            }
+
+            const platform = await vscode.window.showQuickPick(
+                [
+                    { label: '▲ Vercel', description: 'Deploy to Vercel', value: 'vercel' },
+                    { label: '◆ Netlify', description: 'Deploy to Netlify', value: 'netlify' }
+                ],
+                { placeHolder: 'Select deployment platform' }
+            );
+
+            if (!platform) return;
+
+            vscode.window.withProgress({
+                location: vscode.ProgressLocation.Notification,
+                title: `Deploying to ${platform.label}...`,
+                cancellable: false
+            }, async () => {
+                const { exec } = require('child_process');
+
+                try {
+                    // Build first
+                    await new Promise<void>((resolve, reject) => {
+                        exec('npm run build', { cwd: workspaceRoot }, (err: Error | null) => {
+                            if (err) reject(err);
+                            else resolve();
+                        });
+                    });
+
+                    // Deploy
+                    const deployCmd = platform.value === 'vercel'
+                        ? 'npx vercel --yes'
+                        : 'npx netlify deploy --prod --dir=dist';
+
+                    await new Promise<void>((resolve, reject) => {
+                        exec(deployCmd, { cwd: workspaceRoot }, (err: Error | null, stdout: string) => {
+                            if (err) reject(err);
+                            else {
+                                log(stdout);
+                                resolve();
+                            }
+                        });
+                    });
+
+                    vscode.window.showInformationMessage(`✅ Deployed to ${platform.label}!`);
+                } catch (err: any) {
+                    vscode.window.showErrorMessage(`Deployment failed: ${err.message}`);
+                }
+            });
         })
     );
     
-    // Apply execution mode from config
+    // Apply API key from config if present
     const config = vscode.workspace.getConfiguration('liftoff');
-    const executionMode = config.get<string>('executionMode') || 'cloud';
-    agentManager.setExecutionMode(executionMode as any);
-    
-    // Configure Ollama from settings
-    const ollamaUrl = config.get<string>('ollamaUrl') || 'http://localhost:11434';
-    const ollamaModel = config.get<string>('ollamaModel') || 'devstral:latest';
-    agentManager.configureLocal({ url: ollamaUrl, model: ollamaModel });
-    
-    // Prompt for API key if not set
     if (!config.get<string>('huggingfaceApiKey')) {
         vscode.window.showInformationMessage(
             '🚀 Liftoff ready! Set your HuggingFace API key to start.',
             'Set Key'
         ).then(a => { if (a) vscode.commands.executeCommand('liftoff.setApiKey'); });
     } else {
-        agentManager.setApiKey(config.get<string>('huggingfaceApiKey')!);
-        orchestrator.setApiKey(config.get<string>('huggingfaceApiKey')!);
+        const apiKey = config.get<string>('huggingfaceApiKey')!;
+        agentManager.setApiKey(apiKey);
+        orchestrator.setApiKey(apiKey);
     }
     
-    context.subscriptions.push(statusBarItem, agentManager, orchestrator);
+    context.subscriptions.push(statusBarItem, agentManager, orchestrator, appBuilder);
 }
 
 export function deactivate() {
-    agentManager?.dispose();
+    log('Deactivating Liftoff...');
+
+    try { appBuilder?.dispose(); } catch (err: any) { log(`Error: ${err.message}`); }
+    try { orchestrator?.dispose(); } catch (err: any) { log(`Error: ${err.message}`); }
+    try { agentManager?.dispose(); } catch (err: any) { log(`Error: ${err.message}`); }
+    try { persistenceManager?.dispose(); } catch (err: any) { log(`Error: ${err.message}`); }
+    try { semanticMemory?.dispose(); } catch (err: any) { log(`Error: ${err.message}`); }
+    try { orchestratorMemory?.dispose(); } catch (err: any) { log(`Error: ${err.message}`); }
+
+    log('Liftoff deactivated');
 }

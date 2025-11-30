@@ -1,17 +1,17 @@
 import * as vscode from 'vscode';
-import { HuggingFaceProvider, HFMessage, CODING_MODELS, ModelKey } from './hfProvider';
-import { TOOLS, ToolResult, VSCODE_TOOLS } from './tools';
+import { HuggingFaceProvider, HFMessage } from './hfProvider';
+import { TOOLS, ToolResult, VSCODE_TOOLS, Tool } from './tools';
 import { BROWSER_TOOLS } from './tools/browser';
 import { GIT_TOOLS } from './tools/git';
-import { LessonsManager, Lesson } from './tools/lessons';
+import { LessonsManager } from './tools/lessons';
 import { Artifact } from './agentCommunication';
-import { getMcpRouter, McpRouter, disposeMcpRouter } from './mcp';
-import { UnifiedExecutor, getUnifiedToolDescription, getSafetyRulesForPrompt } from './mcp/unified-executor';
-import { HybridRouter, ExecutionTarget, TaskClassification } from './providers/hybridRouter';
-import { OllamaProvider, LOCAL_CODING_MODELS } from './providers/ollama';
-
-export type AgentType = 'frontend' | 'backend' | 'testing' | 'browser' | 'general' | 'cleaner';
-export type AgentStatus = 'idle' | 'running' | 'waiting_user' | 'completed' | 'error' | 'stopped';
+import { getMcpRouter, McpRouter, disposeMcpRouter, disposeMcpOutputChannel } from './mcp';
+import { UnifiedExecutor, getUnifiedToolDescription } from './mcp/unified-executor';
+import { AgentMemory, SemanticMemoryStore } from './memory/agentMemory';
+import { DEFAULT_CLOUD_MODEL_NAME, LIMITS } from './config';
+import { buildAgentSystemPrompt } from './config/prompts';
+import { AgentType, AgentStatus } from './types/agentTypes';
+export { AgentType, AgentStatus } from './types/agentTypes';
 
 export interface Agent {
     id: string;
@@ -27,21 +27,7 @@ export interface Agent {
     startTime: Date;
     endTime?: Date;
     abortController?: AbortController;
-    // Hybrid execution tracking
-    executionTarget?: ExecutionTarget;
-    cloudCalls?: number;
-    localCalls?: number;
-}
-
-export type ExecutionMode = 'cloud' | 'local' | 'hybrid';
-
-export interface HybridStats {
-    cloudAvailable: boolean;
-    localAvailable: boolean;
-    cloudCallsThisHour: number;
-    localCallsThisHour: number;
-    averageCloudLatency: number;
-    averageLocalLatency: number;
+    maxIterations?: number;
 }
 
 const AGENT_EMOJIS: Record<AgentType, string> = {
@@ -53,182 +39,45 @@ const AGENT_EMOJIS: Record<AgentType, string> = {
     cleaner: '🧹'
 };
 
-const MAX_ITERATIONS = 100;
-
-function getSystemPrompt(type: AgentType, mcpTools?: string): string {
-    const executeToolSection = mcpTools || '';
-
-    const typeInstructions: Record<AgentType, string> = {
-        frontend: `You are a Frontend Agent. Use the execute() tool for ALL operations.
-
-EXAMPLES:
-\`\`\`tool
-{"name": "execute", "params": {"code": "return fs.list('src', {recursive: true}).filter(f => f.endsWith('.tsx'))"}}
-\`\`\`
-\`\`\`tool
-{"name": "execute", "params": {"code": "const content = fs.read('src/App.tsx'); return content.substring(0, 500)"}}
-\`\`\`
-\`\`\`tool
-{"name": "execute", "params": {"code": "fs.write('src/components/Button.tsx', 'export const Button = () => <button>Click</button>')"}}
-\`\`\``,
-
-        backend: `You are a Backend Agent. Use the execute() tool for ALL operations.
-
-EXAMPLES:
-\`\`\`tool
-{"name": "execute", "params": {"code": "return fs.list('backend', {recursive: true}).filter(f => f.endsWith('.py'))"}}
-\`\`\`
-\`\`\`tool
-{"name": "execute", "params": {"code": "return shell.run('python -m pytest backend/tests/ -v --tb=short')"}}
-\`\`\`
-\`\`\`tool
-{"name": "execute", "params": {"code": "const content = fs.read('backend/app.py'); return content"}}
-\`\`\``,
-
-        testing: `You are a Testing Agent. Use the execute() tool for ALL operations.
-
-WORKFLOW:
-1. Discover tests first: test.discover() to list available tests (fast)
-2. Run tests one file at a time: test.runFile(path) for faster feedback
-3. Check for errors: vscode.getProblems() for syntax/type errors
-4. Read failing files: fs.read(path)
-5. Fix issues: fs.write(path, newContent)
-6. Re-run the specific test to verify: test.runFile(path)
-
-EXAMPLES:
-\`\`\`tool
-{"name": "execute", "params": {"code": "return test.discover('backend/tests')"}}
-\`\`\`
-\`\`\`tool
-{"name": "execute", "params": {"code": "return test.runFile('backend/tests/test_api.py')"}}
-\`\`\`
-\`\`\`tool
-{"name": "execute", "params": {"code": "return test.run('test_login')"}}
-\`\`\`
-\`\`\`tool
-{"name": "execute", "params": {"code": "return vscode.getProblems().filter(p => p.severity === 'Error')"}}
-\`\`\`
-\`\`\`tool
-{"name": "execute", "params": {"code": "const content = fs.read('src/utils.ts'); return content"}}
-\`\`\`
-\`\`\`tool
-{"name": "execute", "params": {"code": "const old = fs.read('file.ts'); const fixed = old.replace('bug', 'fix'); fs.write('file.ts', fixed); return 'Fixed'"}}
-\`\`\`
-
-RULES:
-- Fix source code, not tests (unless the test is wrong)
-- Ignore security warnings in test files if they're fake credentials`,
-
-        browser: `You are a Browser Agent. Use the execute() tool for ALL operations.
-
-EXAMPLES:
-\`\`\`tool
-{"name": "execute", "params": {"code": "await browser.navigate('http://localhost:3000'); return 'Navigated'"}}
-\`\`\`
-\`\`\`tool
-{"name": "execute", "params": {"code": "return await browser.getElements('button')"}}
-\`\`\`
-\`\`\`tool
-{"name": "execute", "params": {"code": "await browser.click('#submit'); return 'Clicked'"}}
-\`\`\`
-\`\`\`tool
-{"name": "execute", "params": {"code": "await browser.type('#email', 'test@example.com'); return 'Typed'"}}
-\`\`\`
-\`\`\`tool
-{"name": "execute", "params": {"code": "return await browser.screenshot('screenshot.png')"}}
-\`\`\``,
-
-        general: `You are a General Agent. Use the execute() tool for ALL operations.
-
-EXAMPLES:
-\`\`\`tool
-{"name": "execute", "params": {"code": "return fs.list('.', {recursive: true})"}}
-\`\`\`
-\`\`\`tool
-{"name": "execute", "params": {"code": "return git.status()"}}
-\`\`\`
-\`\`\`tool
-{"name": "execute", "params": {"code": "return shell.run('npm install')"}}
-\`\`\`
-\`\`\`tool
-{"name": "execute", "params": {"code": "const pkg = JSON.parse(fs.read('package.json')); return pkg.dependencies"}}
-\`\`\``,
-
-        cleaner: `You are a Cleaner Agent. Use the execute() tool for ALL operations.
-
-Your job is to clean up code, remove unused imports, fix formatting, etc.
-
-EXAMPLES:
-\`\`\`tool
-{"name": "execute", "params": {"code": "return fs.list('src', {recursive: true}).filter(f => f.endsWith('.ts'))"}}
-\`\`\`
-\`\`\`tool
-{"name": "execute", "params": {"code": "return shell.run('npx eslint src --fix')"}}
-\`\`\`
-\`\`\`tool
-{"name": "execute", "params": {"code": "return shell.run('npx prettier --write src')"}}
-\`\`\``
-    };
-
-    const safetyRules = getSafetyRulesForPrompt();
-
-    return `${typeInstructions[type]}
-
-${executeToolSection}
-
-${safetyRules}
-
-# Tool Format
-Always use this EXACT format for tool calls:
-\`\`\`tool
-{"name": "execute", "params": {"code": "YOUR_CODE_HERE"}}
-\`\`\`
-
-OR for task completion:
-\`\`\`tool
-{"name": "task_complete", "params": {"summary": "What you accomplished"}}
-\`\`\`
-
-OR to ask the user a question:
-\`\`\`tool
-{"name": "ask_user", "params": {"question": "Your question here"}}
-\`\`\`
-
-IMPORTANT:
-- Use \`return\` to get results back. Scripts handle data - return only what's needed.
-- READ files before modifying them. Understand the full context.
-- Make minimal, focused changes. Don't rewrite entire files for small fixes.
-- If you corrupt a file, use fs.restore(path) to revert it.
-- After EVERY code change, verify it works before moving on.`;
-}
-
 export class AutonomousAgentManager {
     private hfProvider: HuggingFaceProvider | null = null;
     private mcpRouter: McpRouter | null = null;
     private mcpInitialized = false;
     private agents: Map<string, Agent> = new Map();
     private outputChannel: vscode.OutputChannel;
-    private defaultModel: string = 'meta-llama/Llama-3.3-70B-Instruct';
+    private defaultModel: string = DEFAULT_CLOUD_MODEL_NAME;
     private unifiedExecutor: UnifiedExecutor;
     private lessons: LessonsManager;
     private pendingErrors: Map<string, { error: string; context: string; timestamp: number }> = new Map();
+    
+    // Track consecutive iterations without tool calls per agent
+    private noToolCounts: Map<string, number> = new Map();
+    
+    // Prevent race conditions - track which agents have active loops
+    private activeLoops: Set<string> = new Set();
 
-    // Hybrid execution support
-    private hybridRouter: HybridRouter | null = null;
-    private ollamaProvider: OllamaProvider | null = null;
-    private executionMode: ExecutionMode = 'cloud';
-    private localModel: string = 'qwen2.5-coder:7b-instruct-q5_K_M';
-    private ollamaUrl: string = 'http://localhost:11434';
+    // Memory system - dedicated memory for each agent
+    private semanticMemory: SemanticMemoryStore | null = null;
+    private agentMemories: Map<string, AgentMemory> = new Map();
 
     private readonly _onAgentUpdate = new vscode.EventEmitter<Agent>();
     public readonly onAgentUpdate = this._onAgentUpdate.event;
     private readonly _onAgentOutput = new vscode.EventEmitter<{ agentId: string; content: string; type: 'thought' | 'tool' | 'result' | 'error' }>();
     public readonly onAgentOutput = this._onAgentOutput.event;
 
+    // Event-driven completion
+    private readonly _onAgentComplete = new vscode.EventEmitter<{ agentId: string; status: AgentStatus; agent: Agent }>();
+    public readonly onAgentComplete = this._onAgentComplete.event;
+
+    // Tool execution events for UI
+    private readonly _onToolStart = new vscode.EventEmitter<{ tool: string; params: Record<string, unknown> }>();
+    public readonly onToolStart = this._onToolStart.event;
+    private readonly _onToolComplete = new vscode.EventEmitter<{ tool: string; success: boolean; output: string; duration: number }>();
+    public readonly onToolComplete = this._onToolComplete.event;
+
     private workspaceRoot: string;
 
-    constructor(context: vscode.ExtensionContext) {
-        // Get workspace root from VS Code
+    constructor(context: vscode.ExtensionContext, semanticMemory?: SemanticMemoryStore) {
         const workspaceFolders = vscode.workspace.workspaceFolders;
         this.workspaceRoot = workspaceFolders?.[0]?.uri.fsPath || process.cwd();
 
@@ -236,122 +85,16 @@ export class AutonomousAgentManager {
         this.unifiedExecutor = new UnifiedExecutor(this.workspaceRoot);
         this.lessons = new LessonsManager(this.workspaceRoot);
 
-        // Initialize Ollama provider for local execution
-        this.ollamaProvider = new OllamaProvider({
-            baseUrl: this.ollamaUrl,
-            model: this.localModel,
-            contextLength: 8192,
-        });
+        if (semanticMemory) {
+            this.semanticMemory = semanticMemory;
+            this.outputChannel.appendLine('[AgentManager] Memory system initialized');
+        }
     }
 
     setApiKey(apiKey: string): void {
         this.hfProvider = new HuggingFaceProvider(apiKey);
-        this.outputChannel.appendLine('[AgentManager] Cloud API key set');
-
-        // Initialize Hybrid Router with both cloud and local
-        this.hybridRouter = new HybridRouter({
-            cloudModel: this.defaultModel,
-            cloudApiKey: apiKey,
-            localModel: this.localModel,
-            ollamaUrl: this.ollamaUrl,
-        });
-
-        // Initialize and check availability
-        this.hybridRouter.initialize(apiKey).then(availability => {
-            this.outputChannel.appendLine(`[AgentManager] Hybrid router initialized - Cloud: ${availability.cloud}, Local: ${availability.local}`);
-            if (availability.local) {
-                this.outputChannel.appendLine(`[AgentManager] 🏠 Local Ollama available at ${this.ollamaUrl}`);
-            }
-        });
-
-        // Initialize MCP Router (async)
+        this.outputChannel.appendLine('[AgentManager] API key set');
         this.initMcpRouter();
-    }
-
-    /**
-     * Set execution mode: cloud, local, or hybrid
-     */
-    setExecutionMode(mode: ExecutionMode): void {
-        this.executionMode = mode;
-        this.outputChannel.appendLine(`[AgentManager] Execution mode set to: ${mode}`);
-    }
-
-    /**
-     * Get current execution mode
-     */
-    getExecutionMode(): ExecutionMode {
-        return this.executionMode;
-    }
-
-    /**
-     * Configure local Ollama settings
-     */
-    async configureLocal(options: { url?: string; model?: string }): Promise<boolean> {
-        if (options.url) {
-            this.ollamaUrl = options.url;
-        }
-        if (options.model) {
-            this.localModel = options.model;
-        }
-
-        // Update providers
-        this.ollamaProvider = new OllamaProvider({
-            baseUrl: this.ollamaUrl,
-            model: this.localModel,
-            contextLength: 8192,
-        });
-
-        if (this.hybridRouter) {
-            this.hybridRouter.setLocalModel(this.localModel);
-        }
-
-        // Check availability
-        const available = await this.ollamaProvider.isAvailable();
-        this.outputChannel.appendLine(`[AgentManager] Local Ollama ${available ? '✅ available' : '❌ unavailable'} at ${this.ollamaUrl}`);
-
-        return available;
-    }
-
-    /**
-     * Get hybrid execution stats
-     */
-    getHybridStats(): HybridStats {
-        const availability = this.hybridRouter?.getAvailability() || { cloud: false, local: false };
-        const stats = this.hybridRouter?.getStats() || {
-            cloudCallsThisHour: 0,
-            localCallsThisHour: 0,
-            averageCloudLatency: 0,
-            averageLocalLatency: 0,
-        };
-
-        return {
-            cloudAvailable: availability.cloud,
-            localAvailable: availability.local,
-            cloudCallsThisHour: stats.cloudCallsThisHour,
-            localCallsThisHour: stats.localCallsThisHour,
-            averageCloudLatency: stats.averageCloudLatency,
-            averageLocalLatency: stats.averageLocalLatency,
-        };
-    }
-
-    /**
-     * List available local models
-     */
-    async listLocalModels(): Promise<string[]> {
-        if (!this.ollamaProvider) return [];
-        try {
-            const models = await this.ollamaProvider.listModels();
-            return models.map(m => m.name);
-        } catch {
-            return [];
-        }
-    }
-
-    /**
-     * Check if local execution is available
-     */
-    async isLocalAvailable(): Promise<boolean> {
-        return this.ollamaProvider?.isAvailable() ?? false;
     }
 
     private async initMcpRouter(): Promise<void> {
@@ -362,11 +105,9 @@ export class AutonomousAgentManager {
                 await this.mcpRouter.connectAll(configs);
                 this.mcpInitialized = true;
                 this.outputChannel.appendLine(`[AgentManager] MCP Router initialized with ${configs.length} server(s)`);
-            } else {
-                this.outputChannel.appendLine('[AgentManager] No MCP servers configured');
             }
         } catch (err: any) {
-            this.outputChannel.appendLine(`[AgentManager] MCP init failed (using fallback): ${err.message}`);
+            this.outputChannel.appendLine(`[AgentManager] MCP init failed: ${err.message}`);
         }
     }
 
@@ -379,31 +120,14 @@ export class AutonomousAgentManager {
         type: AgentType;
         task: string;
         model?: string;
-        executionMode?: ExecutionMode;
+        maxIterations?: number;
     }): Promise<Agent> {
-        const { type, task, model, executionMode } = options;
+        const { type, task, model, maxIterations } = options;
         const id = `agent-${Date.now()}-${Math.random().toString(36).substring(2, 15)}`;
-
-        // Determine execution target
-        const mode = executionMode || this.executionMode;
-        let actualModel = model || this.defaultModel;
-        let executionTarget: ExecutionTarget = 'cloud';
-
-        if (mode === 'local') {
-            actualModel = this.localModel;
-            executionTarget = 'local';
-        } else if (mode === 'hybrid' && this.hybridRouter) {
-            // Let hybrid router decide based on task
-            const classification = this.hybridRouter.classifyTask(task);
-            executionTarget = this.hybridRouter.decideTarget(classification);
-            if (executionTarget === 'local') {
-                actualModel = this.localModel;
-            }
-            this.outputChannel.appendLine(`[AgentManager] Hybrid routing: ${classification.type} task -> ${executionTarget} (${classification.reason})`);
-        }
+        const actualModel = model || this.defaultModel;
 
         const mcpTools = getUnifiedToolDescription();
-        const systemPrompt = getSystemPrompt(type, mcpTools);
+        const systemPrompt = buildAgentSystemPrompt(type, mcpTools);
 
         const agent: Agent = {
             id,
@@ -421,46 +145,53 @@ export class AutonomousAgentManager {
             iterations: 0,
             startTime: new Date(),
             abortController: new AbortController(),
-            executionTarget,
-            cloudCalls: 0,
-            localCalls: 0,
+            maxIterations: maxIterations || LIMITS.maxIterations,
         };
 
         this.agents.set(id, agent);
         this._onAgentUpdate.fire(agent);
 
-        const targetEmoji = executionTarget === 'local' ? '🏠' : '☁️';
-        this.outputChannel.appendLine(`[AgentManager] Spawned ${agent.name} ${targetEmoji} (${executionTarget}) with task: ${task}`);
+        this.outputChannel.appendLine(`[AgentManager] Spawned ${agent.name} with task: ${task}`);
 
-        this.runAgentLoop(id);
+        this.runAgentLoop(id).catch(err => {
+            this.outputChannel.appendLine(`[AgentManager] FATAL: Agent loop crashed for ${id}: ${err.message}`);
+            const failedAgent = this.agents.get(id);
+            if (failedAgent) {
+                failedAgent.status = 'error';
+                failedAgent.endTime = new Date();
+                this._onAgentUpdate.fire(failedAgent);
+                this._onAgentComplete.fire({ agentId: id, status: 'error', agent: failedAgent });
+            }
+        });
 
         return agent;
     }
+
 
     private async runAgentLoop(agentId: string): Promise<void> {
         const agent = this.agents.get(agentId);
         if (!agent) return;
 
-        // Check provider availability based on execution target
-        if (agent.executionTarget === 'local') {
-            if (!this.ollamaProvider) {
-                this.emit(agentId, '❌ Local execution requested but Ollama not configured', 'error');
-                agent.status = 'error';
-                return;
-            }
-        } else {
-            if (!this.hfProvider) {
-                this.emit(agentId, '❌ Cloud execution requested but API key not set', 'error');
-                agent.status = 'error';
-                return;
-            }
+        // RACE CONDITION FIX: Prevent multiple loops for same agent
+        if (this.activeLoops.has(agentId)) {
+            this.outputChannel.appendLine(`[AgentManager] Loop already active for ${agentId}, skipping`);
+            return;
+        }
+        this.activeLoops.add(agentId);
+
+        if (!this.hfProvider) {
+            this.emit(agentId, '❌ API key not set', 'error');
+            agent.status = 'error';
+            this.activeLoops.delete(agentId);
+            return;
         }
 
         agent.status = 'running';
         this._onAgentUpdate.fire(agent);
 
         try {
-            while (agent.iterations < MAX_ITERATIONS && agent.status === 'running') {
+            const maxIter = agent.maxIterations || LIMITS.maxIterations;
+            while (agent.iterations < maxIter && agent.status === 'running') {
                 if (agent.abortController?.signal.aborted) {
                     agent.status = 'stopped';
                     this.emit(agentId, '\n🛑 Agent stopped by user', 'error');
@@ -469,49 +200,26 @@ export class AutonomousAgentManager {
 
                 agent.iterations++;
                 this.log(agent, `--- Iteration ${agent.iterations} ---`);
-                console.log(`[AgentLoop] Starting iteration ${agent.iterations}, status: ${agent.status}, messages: ${agent.messages.length}`);
 
                 let response = '';
                 this.emit(agentId, '\n\n💭 ', 'thought');
 
                 try {
-                    const targetEmoji = agent.executionTarget === 'local' ? '🏠' : '☁️';
-                    console.log(`[AgentLoop] ${targetEmoji} Calling ${agent.executionTarget} with model: ${agent.model}`);
-
-                    if (agent.executionTarget === 'local' && this.ollamaProvider) {
-                        // Local execution via Ollama
-                        for await (const chunk of this.ollamaProvider.streamChat(
-                            agent.messages,
-                            { temperature: 0.2, numCtx: 8192 }
-                        )) {
-                            if (agent.abortController?.signal.aborted) {
-                                console.log('[AgentLoop] Aborted during local streaming');
-                                break;
-                            }
-                            response += chunk;
-                            this.emit(agentId, chunk, 'thought');
+                    for await (const chunk of this.hfProvider.streamChat(
+                        agent.model,
+                        agent.messages,
+                        { maxTokens: 2048, temperature: 0.2 }
+                    )) {
+                        if (agent.abortController?.signal.aborted) {
+                            this.log(agent, 'Aborted during streaming');
+                            break;
                         }
-                        agent.localCalls = (agent.localCalls || 0) + 1;
-                    } else if (this.hfProvider) {
-                        // Cloud execution via HuggingFace
-                        for await (const chunk of this.hfProvider.streamChat(
-                            agent.model,
-                            agent.messages,
-                            { maxTokens: 2048, temperature: 0.2 }
-                        )) {
-                            if (agent.abortController?.signal.aborted) {
-                                console.log('[AgentLoop] Aborted during cloud streaming');
-                                break;
-                            }
-                            response += chunk;
-                            this.emit(agentId, chunk, 'thought');
-                        }
-                        agent.cloudCalls = (agent.cloudCalls || 0) + 1;
+                        response += chunk;
+                        this.emit(agentId, chunk, 'thought');
                     }
-                    console.log(`[AgentLoop] ${targetEmoji} Response received, length: ${response.length}`);
                 } catch (apiError: any) {
-                    console.error('[AgentLoop] API Error:', apiError);
-                    this.emit(agentId, `\n❌ ${agent.executionTarget} API Error: ${apiError.message}`, 'error');
+                    this.outputChannel.appendLine(`[AgentLoop] API Error for ${agentId}: ${apiError.message}`);
+                    this.emit(agentId, `\n❌ API Error: ${apiError.message}`, 'error');
                     agent.status = 'error';
                     break;
                 }
@@ -520,9 +228,9 @@ export class AutonomousAgentManager {
 
                 agent.messages.push({ role: 'assistant', content: response });
 
-                const toolCalls = this.parseToolCalls(response);
+                const toolParse = this.parseToolCalls(response);
 
-                if (toolCalls.length === 0) {
+                if (toolParse.calls.length === 0) {
                     if (response.toLowerCase().includes('task_complete') ||
                         response.toLowerCase().includes('task complete')) {
                         agent.status = 'completed';
@@ -530,94 +238,101 @@ export class AutonomousAgentManager {
                         break;
                     }
 
-                    const noToolKey = `${agentId}_no_tool_count`;
-                    const currentCount = (this as any)[noToolKey] || 0;
-                    (this as any)[noToolKey] = currentCount + 1;
+                    const currentCount = this.noToolCounts.get(agentId) || 0;
+                    this.noToolCounts.set(agentId, currentCount + 1);
 
-                    const lowerResponse = response.toLowerCase();
-                    const isStuck = lowerResponse.includes('let me') ||
-                                   lowerResponse.includes('i will') ||
-                                   lowerResponse.includes('i need to') ||
-                                   (lowerResponse.includes('fix') && !lowerResponse.includes('```'));
-
-                    if (isStuck) {
-                        this.emit(agentId, '\n⚠️ Model confused - forcing tool use', 'error');
+                    if (toolParse.invalid.length > 0) {
+                        if (currentCount >= 3) {
+                            this.emit(agentId, '\n\n⏹️ Agent stuck - invalid tool blocks after 3 attempts. Stopping.', 'error');
+                            agent.status = 'error';
+                            break;
+                        }
+                        agent.messages.push({
+                            role: 'user',
+                            content: [
+                                'Your last tool block could not be parsed as JSON.',
+                                '',
+                                'Return ONE tool block only, shaped like:',
+                                '```',
+                                '{"name": "execute", "params": {"code": "YOUR_CODE_HERE"}}',
+                                '```'
+                            ].join('\n')
+                        });
+                        continue;
                     }
 
                     if (currentCount >= 3) {
                         this.emit(agentId, '\n\n⚠️ Agent stuck - no valid tool calls after 3 attempts. Stopping.', 'error');
-                        this.emit(agentId, '\n\nLast response did not contain a valid tool block. Expected format:\n```tool\n{"name": "tool_name", "params": {...}}\n```', 'error');
                         agent.status = 'error';
                         break;
                     }
 
                     agent.messages.push({
                         role: 'user',
-                        content: `STOP! Your response did not contain a valid tool call.
-
-DO NOT explain what you will do. DO NOT say "I will" or "Let me".
-JUST OUTPUT THE TOOL BLOCK directly.
-
-FORMAT (copy this exactly):
-\`\`\`tool
-{"name": "execute", "params": {"code": "YOUR_CODE_HERE"}}
-\`\`\`
-
-EXAMPLES:
-- Get errors: {"name": "execute", "params": {"code": "return vscode.getProblems().filter(p => p.severity === 'Error')"}}
-- Read file: {"name": "execute", "params": {"code": "return fs.read('path/to/file.ts')"}}
-- Run tests: {"name": "execute", "params": {"code": "return test.runFile('backend/tests/test_api.py')"}}
-- Write file: {"name": "execute", "params": {"code": "fs.write('path/to/file.ts', newContent); return 'Done'"}}
-- Done: {"name": "task_complete", "params": {"summary": "What I did"}}
-
-OUTPUT A TOOL BLOCK NOW - nothing else!`
+                        content: [
+                            'STOP! Your response did not contain a valid tool call.',
+                            '',
+                            'DO NOT explain what you will do. JUST OUTPUT THE TOOL BLOCK directly.',
+                            '',
+                            'FORMAT:',
+                            '```',
+                            '{"name": "execute", "params": {"code": "YOUR_CODE_HERE"}}',
+                            '```',
+                            '',
+                            'OUTPUT A TOOL BLOCK NOW - nothing else!'
+                        ].join('\n')
                     });
                     continue;
                 }
 
-                (this as any)[`${agentId}_no_tool_count`] = 0;
+                // Reset no-tool counter on successful tool use
+                this.noToolCounts.set(agentId, 0);
 
-                const call = toolCalls[0];
-                console.log(`[AgentLoop] Executing tool: ${call.name}`, call.params);
+                const call = toolParse.calls[0];
+                this.log(agent, `Executing tool: ${call.name}`);
                 this.emit(agentId, `\n\n🔧 ${call.name}`, 'tool');
 
-                const result = await this.executeTool(call.name, call.params, agent.type);
-                console.log(`[AgentLoop] Tool result: success=${result.success}, output length=${result.output?.length || 0}`);
+                // Fire toolStart event for UI
+                this._onToolStart.fire({ tool: call.name, params: call.params });
+                const toolStartTime = Date.now();
+
+                const result = await this.executeTool(call.name, call.params);
+                this.log(agent, `Tool result: success=${result.success}`);
                 agent.toolHistory.push({ tool: call.name, params: call.params, result });
 
                 const output = result.success
                     ? result.output.substring(0, 50000)
                     : `Error: ${result.error}`;
 
+                // Fire toolComplete event for UI
+                this._onToolComplete.fire({
+                    tool: call.name,
+                    success: result.success,
+                    output: output.substring(0, 2000),
+                    duration: Date.now() - toolStartTime
+                });
+
                 this.emit(agentId, `\n📋 ${output}`, 'result');
-                console.log(`[AgentLoop] Emitted result, continuing to next iteration...`);
 
                 // Lessons system
                 let lessonsHint = '';
-
                 if (!result.success && result.error) {
                     this.pendingErrors.set(agentId, {
                         error: result.error,
                         context: `${call.name}: ${JSON.stringify(call.params)}`,
                         timestamp: Date.now()
                     });
-
                     const relevantLessons = this.lessons.findRelevant(result.error);
                     if (relevantLessons.length > 0) {
                         lessonsHint = this.lessons.formatForPrompt(relevantLessons);
-                        this.emit(agentId, `\n💡 Found ${relevantLessons.length} relevant fix(es) from past experience`, 'result');
+                        this.emit(agentId, `\n💡 Found ${relevantLessons.length} relevant fix(es)`, 'result');
                     }
                 } else if (result.success) {
                     const pending = this.pendingErrors.get(agentId);
                     if (pending && Date.now() - pending.timestamp < 120000) {
                         const fixDesc = this.describeFix(call.name, call.params);
-                        this.lessons.recordFix(
-                            pending.error,
-                            pending.context,
-                            `${call.name}: ${JSON.stringify(call.params)}`,
-                            fixDesc
-                        );
-                        this.emit(agentId, `\n📚 Learned: "${fixDesc}" fixes "${pending.error.substring(0, 50)}..."`, 'result');
+                        this.lessons.recordFix(pending.error, pending.context, `${call.name}`, fixDesc);
+                        this.emit(agentId, `\n📚 Learned: "${fixDesc}"`, 'result');
                         this.pendingErrors.delete(agentId);
                     }
                 }
@@ -634,38 +349,13 @@ OUTPUT A TOOL BLOCK NOW - nothing else!`
                     break;
                 }
 
-                let nextHint = 'Next action?';
-                if (call.name === 'run_command') {
-                    if (output.includes('Port') && output.includes('in use') || output.includes('still in use')) {
-                        nextHint = 'APP IS ALREADY RUNNING! Do NOT start again. Use browser_navigate to http://localhost:5176 now.';
-                    } else if (output.includes('started successfully') || output.includes('SUCCESS')) {
-                        nextHint = 'App started! Wait 5 seconds for frontend to be ready, then use browser_navigate to http://localhost:5176.';
-                    }
-                } else if (call.name === 'browser_navigate') {
-                    if (output.includes('Failed') || output.includes('error')) {
-                        nextHint = 'Navigation failed. Use browser_wait for 5 seconds, then try browser_navigate again.';
-                    } else {
-                        nextHint = 'Page loaded. Use browser_get_elements to see what you can interact with.';
-                    }
-                } else if (call.name === 'browser_get_elements') {
-                    if (output.includes('No interactive elements')) {
-                        nextHint = 'No elements found - page may still be loading. Use browser_wait for 3 seconds, then browser_get_elements again.';
-                    } else {
-                        nextHint = 'Now use browser_click or browser_type with the selectors shown above. ONE action at a time!';
-                    }
-                } else if (call.name === 'browser_click' || call.name === 'browser_type') {
-                    nextHint = 'Action done. Use browser_get_elements or browser_get_text to see the result.';
-                } else if (call.name === 'browser_wait') {
-                    nextHint = 'Wait complete. Now proceed with your next action.';
-                }
-
                 agent.messages.push({
                     role: 'user',
-                    content: `Result of ${call.name}:\n${output}${lessonsHint}\n\n${nextHint}`
+                    content: `Result of ${call.name}:\n${output}${lessonsHint}\n\nNext action?`
                 });
             }
 
-            if (agent.iterations >= MAX_ITERATIONS && agent.status === 'running') {
+            if (agent.iterations >= maxIter && agent.status === 'running') {
                 this.emit(agentId, '\n\n⚠️ Max iterations reached', 'error');
                 agent.status = 'error';
             }
@@ -673,100 +363,74 @@ OUTPUT A TOOL BLOCK NOW - nothing else!`
         } catch (error: any) {
             this.emit(agentId, `\n\n❌ Error: ${error.message}`, 'error');
             agent.status = 'error';
+        } finally {
+            // RACE CONDITION FIX: Always clear the active loop flag
+            this.activeLoops.delete(agentId);
         }
 
         agent.endTime = new Date();
         this._onAgentUpdate.fire(agent);
+        this._onAgentComplete.fire({ agentId, status: agent.status, agent });
     }
 
-    /**
-     * Attempt to fix common JSON errors from LLMs
-     */
+
     private fixJson(json: string): string {
         let fixed = json.trim();
-
-        // Remove trailing garbage after valid JSON
-        // e.g., {"name": "foo", "params": {}}"}  -> {"name": "foo", "params": {}}
         const extraBraceMatch = fixed.match(/^(\{[\s\S]*\})\}+["\s]*$/);
-        if (extraBraceMatch) {
-            fixed = extraBraceMatch[1];
-        }
-
-        // Fix unclosed strings in code params (common with fs.read)
-        // e.g., {"code": "return fs.read('file.ts')}}"} -> fix quotes
+        if (extraBraceMatch) fixed = extraBraceMatch[1];
         fixed = fixed.replace(/'\)\}*"\}*$/, "')\"}");
-
-        // Balance braces - count { and } and add missing ones
         const openBraces = (fixed.match(/\{/g) || []).length;
         const closeBraces = (fixed.match(/\}/g) || []).length;
         if (openBraces > closeBraces) {
             fixed += '}'.repeat(openBraces - closeBraces);
-        } else if (closeBraces > openBraces) {
-            // Remove extra closing braces from the end
-            const excess = closeBraces - openBraces;
-            for (let i = 0; i < excess; i++) {
-                const lastBrace = fixed.lastIndexOf('}');
-                if (lastBrace > 0) {
-                    fixed = fixed.substring(0, lastBrace) + fixed.substring(lastBrace + 1);
-                }
-            }
         }
-
         return fixed;
     }
 
-    private parseToolCalls(response: string): Array<{ name: string; params: Record<string, any> }> {
+    private parseToolCalls(response: string): { calls: Array<{ name: string; params: Record<string, any> }>; invalid: string[] } {
         const calls: Array<{ name: string; params: Record<string, any> }> = [];
-
+        const invalid: string[] = [];
         const toolBlockRegex = /```tool\s*\n?([\s\S]*?)```/g;
         let match;
 
         while ((match = toolBlockRegex.exec(response)) !== null) {
-            let json = match[1].trim();
-
-            // Try parsing directly first
-            let parsed: any = null;
-            try {
-                parsed = JSON.parse(json);
-            } catch (e) {
-                // Try fixing common JSON errors
-                this.outputChannel.appendLine(`[parseToolCalls] JSON parse failed, attempting fix: ${json}`);
-                try {
-                    const fixed = this.fixJson(json);
-                    this.outputChannel.appendLine(`[parseToolCalls] Fixed JSON: ${fixed}`);
-                    parsed = JSON.parse(fixed);
-                } catch (e2) {
-                    // Last resort: try to extract name and code manually
-                    const nameMatch = json.match(/"name"\s*:\s*"([^"]+)"/);
-                    const codeMatch = json.match(/"code"\s*:\s*"([\s\S]+?)(?:"\s*\}|"$)/);
-                    if (nameMatch && codeMatch) {
-                        parsed = { name: nameMatch[1], params: { code: codeMatch[1] } };
-                        this.outputChannel.appendLine(`[parseToolCalls] Extracted via regex: ${JSON.stringify(parsed)}`);
-                    } else {
-                        this.outputChannel.appendLine(`[parseToolCalls] Failed to parse: ${json}`);
-                        continue;
-                    }
-                }
-            }
-
-            if (parsed && parsed.name && typeof parsed.name === 'string') {
-                const { name, params, ...rest } = parsed;
-                const extractedParams = params || (Object.keys(rest).length > 0 ? rest : {});
-
-                this.outputChannel.appendLine(`[parseToolCalls] Extracted tool: ${name}, params: ${JSON.stringify(extractedParams)}`);
-
-                calls.push({
-                    name: name,
-                    params: extractedParams
-                });
-                break;
+            const json = match[1].trim();
+            const parsed = this.safeParseToolBlock(json);
+            if (parsed) {
+                calls.push(parsed);
+            } else {
+                invalid.push(json.slice(0, 200));
             }
         }
 
-        return calls;
+        return { calls, invalid };
     }
 
-    private async executeTool(name: string, params: Record<string, any>, agentType: AgentType): Promise<ToolResult> {
+    private safeParseToolBlock(raw: string): { name: string; params: Record<string, any> } | null {
+        const attempts = [raw, this.fixJson(raw)];
+        for (const attempt of attempts) {
+            try {
+                const parsed = JSON.parse(attempt);
+                if (parsed && parsed.name && typeof parsed.name === 'string') {
+                    const { name, params, ...rest } = parsed;
+                    return { name, params: params || rest || {} };
+                }
+            } catch {
+                // fall through
+            }
+        }
+
+        const nameMatch = raw.match(/"name"\s*:\s*"([^"]+)"/);
+        const codeMatch = raw.match(/"code"\s*:\s*"([\s\S]+?)(?:"\s*\}|"$)/);
+        if (nameMatch) {
+            const params = codeMatch ? { code: codeMatch[1] } : {};
+            return { name: nameMatch[1], params };
+        }
+
+        return null;
+    }
+
+    private async executeTool(name: string, params: Record<string, any>): Promise<ToolResult> {
         try {
             if (name === 'execute') {
                 const result = await this.unifiedExecutor.execute(params.code, params.timeout);
@@ -794,7 +458,7 @@ OUTPUT A TOOL BLOCK NOW - nothing else!`
                 return { success: true, output: `Question: ${params.question}` };
             }
 
-            const allTools = [
+            const allTools: Tool[] = [
                 ...Object.values(TOOLS),
                 ...Object.values(VSCODE_TOOLS),
                 ...Object.values(BROWSER_TOOLS),
@@ -820,6 +484,7 @@ OUTPUT A TOOL BLOCK NOW - nothing else!`
         return `${toolName} call`;
     }
 
+
     async continueAgent(agentId: string, userResponse: string): Promise<void> {
         const agent = this.agents.get(agentId);
         if (!agent || agent.status !== 'waiting_user') return;
@@ -828,7 +493,16 @@ OUTPUT A TOOL BLOCK NOW - nothing else!`
         agent.status = 'running';
         this._onAgentUpdate.fire(agent);
 
-        this.runAgentLoop(agentId);
+        this.runAgentLoop(agentId).catch(err => {
+            this.outputChannel.appendLine(`[AgentManager] FATAL: Continued agent loop crashed: ${err.message}`);
+            const failedAgent = this.agents.get(agentId);
+            if (failedAgent) {
+                failedAgent.status = 'error';
+                failedAgent.endTime = new Date();
+                this._onAgentUpdate.fire(failedAgent);
+                this._onAgentComplete.fire({ agentId, status: 'error', agent: failedAgent });
+            }
+        });
     }
 
     stopAgent(agentId: string): void {
@@ -840,7 +514,6 @@ OUTPUT A TOOL BLOCK NOW - nothing else!`
         }
     }
 
-    // Alias for stopAgent (used by UI panels)
     killAgent(agentId: string): void {
         this.stopAgent(agentId);
     }
@@ -855,7 +528,6 @@ OUTPUT A TOOL BLOCK NOW - nothing else!`
     }
 
     private emit(agentId: string, content: string, type: 'thought' | 'tool' | 'result' | 'error'): void {
-        console.log('[AgentManager] emit:', type, agentId, content.substring(0, 50));
         this._onAgentOutput.fire({ agentId, content, type });
     }
 
@@ -885,13 +557,34 @@ OUTPUT A TOOL BLOCK NOW - nothing else!`
         if (event === 'agentOutput' || event === 'output') {
             return this._onAgentOutput.event(cb as any);
         }
+        if (event === 'newArtifact') {
+            const lastArtifactCount = new Map<string, number>();
+            return this._onAgentUpdate.event((agent) => {
+                const prevCount = lastArtifactCount.get(agent.id) || 0;
+                if (agent.artifacts.length > prevCount) {
+                    for (let i = prevCount; i < agent.artifacts.length; i++) {
+                        cb(agent.artifacts[i]);
+                    }
+                    lastArtifactCount.set(agent.id, agent.artifacts.length);
+                }
+            });
+        }
         return { dispose: () => {} };
     }
 
     public dispose(): void {
         this.stopAllAgents();
+        this.activeLoops.clear();  // Clear race condition tracker
+        this._onAgentUpdate.dispose();
+        this._onAgentOutput.dispose();
+        this._onAgentComplete.dispose();
+        this._onToolStart.dispose();
+        this._onToolComplete.dispose();
         this.outputChannel.dispose();
         disposeMcpRouter();
-        this.unifiedExecutor.dispose();
+        disposeMcpOutputChannel();
+        // UnifiedExecutor.dispose() is async but we're in sync context
+        // Fire and forget - browser cleanup is best-effort
+        this.unifiedExecutor.dispose().catch(() => {});
     }
 }

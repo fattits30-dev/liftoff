@@ -1,5 +1,5 @@
 // Browser automation tools using Playwright
-import { Tool, ToolResult } from './index';
+import { Tool } from './index';
 
 let playwright: any = null;
 let browser: any = null;
@@ -67,7 +67,7 @@ export const BROWSER_TOOLS: Record<string, Tool> = {
                     const results: any[] = [];
                     
                     // Get buttons
-                    document.querySelectorAll('button, [role="button"], input[type="submit"], input[type="button"]').forEach((el: any, i) => {
+                    document.querySelectorAll('button, [role="button"], input[type="submit"], input[type="button"]').forEach((el: any) => {
                         const text = el.innerText?.trim() || el.value || el.getAttribute('aria-label') || '';
                         if (text) {
                             results.push({ type: 'button', text: text.substring(0, 50), selector: `button:has-text("${text.substring(0, 30)}")` });
@@ -218,7 +218,7 @@ export const BROWSER_TOOLS: Record<string, Tool> = {
                 const p = await ensureBrowser();
                 const visible = await p.isVisible(params.selector);
                 return { success: true, output: visible ? `✓ Element "${params.selector}" is visible` : `✗ Element "${params.selector}" is NOT visible` };
-            } catch (e: any) {
+            } catch (_e: any) {
                 return { success: true, output: `✗ Element "${params.selector}" not found` };
             }
         }

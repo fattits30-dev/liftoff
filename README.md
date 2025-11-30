@@ -1,135 +1,172 @@
-# 🚀 Liftoff - Agent Manager for VS Code
+# 🚀 Liftoff - Autonomous AI Coding Agents for VS Code
 
-Sheffield's answer to Google Antigravity. Multi-agent orchestration with Claude Code integration and browser automation.
+**Liftoff is an autonomous multi-agent system that actually DOES the work, not just suggests it.**
 
-## Features
+You give it a task → It plans → Spawns specialized agents → They execute → You get results.
 
-### 💬 Chat Interface
-- **Tab-based UI** - Each agent gets its own tab, like browser tabs
-- **Real-time chat** - Talk to agents just like chatting with Claude
-- **Multi-turn conversations** - Full context preserved between messages
-- **Streaming responses** - See agent output as it happens
-- **Your messages highlighted** - Clear distinction between you and agent
+## How It Works
 
-### 🎛️ Agent Manager Surface
-- Spawn, orchestrate, and observe multiple AI agents simultaneously
-- Real-time streaming JSON output from Claude Code
-- Visual status tracking (running, completed, error)
-- Cost tracking per agent
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    YOUR TASK                                │
+│              "Add a login form and test it"                 │
+└─────────────────────────────────────────────────────────────┘
+                         │
+                         ▼
+┌─────────────────────────────────────────────────────────────┐
+│              ORCHESTRATOR (Planning Brain)                  │
+│  • Breaks task into steps                                   │
+│  • Picks the right specialist for each step                 │
+│  • Retries failures (max 3 attempts)                        │
+│  • Tracks unresolved issues as TODOs                        │
+└─────────────────────────────────────────────────────────────┘
+                    │           │
+          Step 1    │           │  Step 2
+                    ▼           ▼
+         ┌──────────────┐  ┌──────────────┐
+         │ 🎨 Frontend  │  │ 🧪 Testing   │
+         │    Agent     │  │    Agent     │
+         └──────────────┘  └──────────────┘
+                    │           │
+                    ▼           ▼
+              Creates form   Runs tests
+              component      verifies it
+```
 
-### 🤖 Specialized Agents
-| Type | Focus |
-|------|-------|
-| 🎨 Frontend | UI/UX, React, CSS, accessibility |
-| ⚙️ Backend | APIs, databases, server logic |
-| 🧪 Testing | Tests, coverage, mocking |
-| 🌐 Browser | Playwright automation, screenshots |
-| 🔧 General | Any development task |
+## Specialized Agents
 
-### 🔄 Inter-Agent Communication
-- Agents can hand off tasks to specialists automatically
-- `HANDOFF:backend:` syntax triggers auto-spawn of target agent
-- Broadcast messages to all agents
-- Full message history tracking
+| Agent | Expertise |
+|-------|-----------|
+| 🎨 **Frontend** | React, Vue, CSS, HTML, UI components, styling |
+| ⚙️ **Backend** | APIs, databases, Python, Node.js, business logic |
+| 🧪 **Testing** | Run tests, fix failures, write new tests |
+| 🌐 **Browser** | Playwright automation, UI testing, screenshots |
+| 🧹 **Cleaner** | Dead code removal, linting, formatting |
+| 🔧 **General** | File operations, git, misc tasks |
 
-### 📦 Artifact System
-- Automatic extraction of code blocks from agent output
-- Screenshot capture from browser agent
-- Filter artifacts by type (code, screenshots, files)
-- Copy code, view screenshots, open files directly
+Each agent has its own LLM loop with a specialized system prompt and full tool access.
 
-### 💾 Persistent History
-- Session history saved automatically
-- View past sessions with agent records and artifacts
-- Survives VS Code restarts
 
-### 🌐 Browser Automation
-- Built-in Playwright integration
-- Automatic responsive testing (mobile, tablet, desktop)
-- Screenshot capture with artifact tracking
-- Navigate, click, type, evaluate scripts
+## Retry & TODO System
+
+Liftoff doesn't give up easily:
+
+1. **Task fails** → Orchestrator analyzes error
+2. **Retry 1** → Maybe different approach
+3. **Retry 2** → Try harder
+4. **Retry 3** → Last chance
+5. **Still failing?** → Added to TODO list, continue with other work
+
+At the end you get a summary + any TODOs that need manual attention.
 
 ## Quick Start
 
 ```bash
+# Clone and build
 cd liftoff
-setup.bat          # Windows
-# or
-npm install && npm run compile
+npm install
+npm run compile
+
+# Run in VS Code
+# Press F5 to launch Extension Development Host
 ```
 
 Then:
-1. Open folder in VS Code
-2. Press **F5** to launch
-3. Click 🚀 rocket in sidebar
-4. Spawn agents and watch 'em work
+1. Set your HuggingFace API key: `Ctrl+Shift+P` → "Liftoff: Set HuggingFace API Key"
+2. Click the 🚀 rocket in the sidebar
+3. Open Orchestrator Chat and describe what you want built
+4. Watch agents spawn and work autonomously
 
 ## Commands
 
-- `Liftoff: Open Agent Manager` - Focus the manager panel
-- `Liftoff: Spawn New Agent` - Quick spawn via command palette
-- `Liftoff: Continue Agent Conversation` - Resume a completed agent
-- `Liftoff: Stop All Agents` - Kill everything
-- `Liftoff: View Session History` - Browse past sessions
-
-## Claude Code Integration
-
-Liftoff uses Claude Code's headless mode with full streaming JSON output:
-
-```bash
-claude -p "task" --output-format stream-json --append-system-prompt "..." --allowedTools "..."
-```
-
-Features used:
-- `--output-format stream-json` - Real-time streaming with structured data
-- `--append-system-prompt` - Agent-specific personalities
-- `--allowedTools` - Restricted toolsets per agent type
-- `--resume <session-id>` - Multi-turn conversation support
-- Session IDs for conversation continuity
-
-## Requirements
-
-- VS Code 1.85+
-- Node.js 18+
-- Claude Code CLI installed
-- Playwright (installed automatically)
+| Command | Description |
+|---------|-------------|
+| `Liftoff: Open Agent Manager` | View all agents and their status |
+| `Liftoff: Open Orchestrator Chat` | Talk to the planning brain |
+| `Liftoff: Spawn New Agent` | Manually spawn a specific agent type |
+| `Liftoff: Set HuggingFace API Key` | Configure cloud inference |
+| `Liftoff: Stop All Agents` | Emergency stop |
+| `Liftoff: View Session History` | See past sessions |
+| `Liftoff: Initialize MCP Config` | Set up MCP servers |
 
 ## Configuration
 
-In VS Code settings (`Ctrl+,`):
-
 | Setting | Default | Description |
 |---------|---------|-------------|
-| `liftoff.claudePath` | `C:\Users\sava6\.local\bin\claude.exe` | Path to Claude Code CLI |
-| `liftoff.autoHandoff` | `true` | Auto-spawn agents on handoff requests |
+| `liftoff.huggingfaceApiKey` | - | Your HuggingFace API key (required) |
+| `liftoff.defaultModel` | `deepseek-ai/DeepSeek-V3-0324` | Default LLM for agents |
+| `liftoff.autoHandoff` | `true` | Auto-spawn agents when orchestrator delegates |
+| `liftoff.showAgentButtons` | `true` | Show quick-spawn buttons in UI |
+
+
+## Available Models (HuggingFace)
+
+| Model | Best For |
+|-------|----------|
+| `deepseek-ai/DeepSeek-V3-0324` | General coding (default, recommended) |
+| `deepseek-ai/DeepSeek-R1` | Complex reasoning tasks |
+| `Qwen/Qwen2.5-Coder-32B-Instruct` | Code generation |
+| `Qwen/Qwen3-Coder-30B-A3B-Instruct` | Fast coding |
+| `meta-llama/Llama-3.3-70B-Instruct` | General purpose |
 
 ## Architecture
 
 ```
 src/
-├── extension.ts           # Entry point, command registration
-├── agentManager.ts        # Agent lifecycle, Claude Code subprocess
-├── agentCommunication.ts  # Inter-agent messaging, artifacts
-├── managerViewProvider.ts # Manager Surface UI
-├── artifactViewerProvider.ts # Artifact panel UI
-├── browserAutomation.ts   # Playwright wrapper
-└── persistence.ts         # Session history storage
+├── extension.ts           # VS Code entry point, command registration
+├── mainOrchestrator.ts    # 🧠 Planning brain - delegates to agents
+├── autonomousAgent.ts     # Agent manager - spawns/runs specialized agents
+├── hfProvider.ts          # HuggingFace API streaming client
+├── config/
+│   └── models.ts          # Model definitions and defaults
+├── tools/                 # Agent tooling (file ops, git, browser)
+├── mcp/                   # MCP server integration
+├── memory/                # Semantic memory and lessons system
+└── webview/               # UI components
 ```
 
-## How Handoffs Work
+## How Agents Execute
 
-Agents can request help from specialists using simple syntax in their output:
+Each agent runs in a loop:
+1. **Think** - LLM decides what tool to call
+2. **Execute** - Tool runs (file write, terminal command, browser action)
+3. **Observe** - Result fed back to LLM
+4. **Repeat** until task complete or max iterations
 
-```
-HANDOFF:frontend:Build a responsive navbar with mobile menu
-HANDOFF:testing:Write unit tests for the auth module
-HANDOFF:browser:Test the login flow at http://localhost:3000
-```
+Agents have access to:
+- File system (read, write, search)
+- Terminal (run commands, see output)
+- Git (commit, branch, diff)
+- Browser (Playwright - navigate, click, screenshot)
+- Lessons DB (remember what worked before)
 
-Liftoff parses these and auto-spawns the appropriate agent.
+## Requirements
 
-## Built in Sheffield 🍺
+- VS Code 1.85+
+- Node.js 18+
+- HuggingFace API key (free tier works)
+- [uv](https://docs.astral.sh/uv/) (for Serena semantic tools)
 
-No corporate bollocks. No rate limits. Your agents, your rules.
+## Serena Integration (IDE-like Code Intelligence)
 
-Made with Henderson's Relish and spite.
+Liftoff integrates [Serena](https://github.com/oraios/serena) for semantic code understanding. Instead of agents reading whole files, they can:
+
+| Tool | What It Does |
+|------|--------------|
+| `find_symbol` | Find functions/classes by name |
+| `find_referencing_symbols` | Find all usages of a symbol |
+| `get_symbol_documentation` | Get docstrings without reading files |
+| `insert_after_symbol` | Add code after a function |
+| `replace_symbol_body` | Edit just a function body |
+| `search_for_pattern` | Regex search across project |
+
+**Benefits:**
+- 🚀 70% token savings (no reading whole files)
+- 🎯 Precise edits (symbol-level, not string replace)
+- 🧠 Understands code structure via LSP
+
+Serena is auto-configured in `.mcp.json` - just make sure `uv` is installed.
+
+## License
+
+MIT

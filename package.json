@@ -1,14 +1,18 @@
 {
   "name": "liftoff",
-  "displayName": "Liftoff - Agent Manager",
-  "description": "Multi-agent orchestration for Claude Code with browser automation - Sheffield's answer to Antigravity",
+  "displayName": "Liftoff - Autonomous AI Agents",
+  "description": "Autonomous multi-agent coding system. You give tasks, it plans and executes with specialized agents (frontend, backend, testing, browser). Retry on failure, TODO tracking, real tool execution.",
   "version": "0.1.0",
   "publisher": "jamie",
   "engines": {
     "vscode": "^1.85.0"
   },
-  "categories": ["Other"],
-  "activationEvents": ["onStartupFinished"],
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
   "main": "./dist/extension.js",
   "contributes": {
     "commands": [
@@ -49,16 +53,24 @@
         "title": "Liftoff: Initialize MCP Config"
       },
       {
-        "command": "liftoff.configureOllama",
-        "title": "Liftoff: Configure Local Ollama"
-      },
-      {
-        "command": "liftoff.checkLocalStatus",
-        "title": "Liftoff: Check Local Ollama Status"
-      },
-      {
         "command": "liftoff.orchestratorChat",
         "title": "Liftoff: Open Orchestrator Chat"
+      },
+      {
+        "command": "liftoff.buildApp",
+        "title": "Liftoff: Build App from Description"
+      },
+      {
+        "command": "liftoff.resumeBuild",
+        "title": "Liftoff: Resume Interrupted Build"
+      },
+      {
+        "command": "liftoff.addFeature",
+        "title": "Liftoff: Add Feature to App"
+      },
+      {
+        "command": "liftoff.deployApp",
+        "title": "Liftoff: Deploy App"
       }
     ],
     "viewsContainers": {
@@ -92,7 +104,11 @@
         { "command": "liftoff.killAllAgents" },
         { "command": "liftoff.continueAgent" },
         { "command": "liftoff.viewHistory" },
-        { "command": "liftoff.setApiKey" }
+        { "command": "liftoff.setApiKey" },
+        { "command": "liftoff.buildApp" },
+        { "command": "liftoff.resumeBuild" },
+        { "command": "liftoff.addFeature" },
+        { "command": "liftoff.deployApp" }
       ]
     },
     "configuration": {
@@ -110,76 +126,27 @@
             "deepseek-ai/DeepSeek-V3-0324",
             "Qwen/Qwen2.5-Coder-32B-Instruct",
             "deepseek-ai/DeepSeek-R1",
-            "Qwen/Qwen3-235B-A22B",
-            "Qwen/Qwen3-32B",
             "Qwen/Qwen2.5-72B-Instruct",
-            "meta-llama/Llama-3.3-70B-Instruct",
-            "mistralai/Mixtral-8x22B-Instruct-v0.1"
+            "meta-llama/Llama-3.3-70B-Instruct"
           ],
           "enumDescriptions": [
-            "DeepSeek V3 - Best for agents, excellent instruction following (RECOMMENDED)",
-            "Qwen Coder 32B - Fast, optimized for coding tasks",
-            "DeepSeek R1 - Deep reasoning, good for complex debugging",
-            "Qwen3 235B - Large MoE, can be verbose",
-            "Qwen3 32B - Fast general purpose",
-            "Qwen 72B - Good balance of speed/quality",
-            "Llama 3.3 70B - Meta's flagship model",
-            "Mixtral 8x22B - Mistral's MoE model"
+            "DeepSeek V3 - Best for agents (RECOMMENDED)",
+            "Qwen Coder 32B - Fast, optimized for coding",
+            "DeepSeek R1 - Deep reasoning",
+            "Qwen 72B - Good balance",
+            "Llama 3.3 70B - Meta's flagship"
           ],
-          "description": "Model for agents. DeepSeek-V3 recommended for best instruction following."
+          "description": "Model for agents. DeepSeek-V3 recommended."
         },
         "liftoff.autoHandoff": {
           "type": "boolean",
           "default": true,
-          "description": "Automatically spawn agents when handoffs are detected"
+          "description": "Auto-spawn agents on handoff requests"
         },
-        "liftoff.executionMode": {
-          "type": "string",
-          "default": "cloud",
-          "enum": ["cloud", "local", "hybrid"],
-          "enumDescriptions": [
-            "Cloud only - Use HuggingFace for all inference",
-            "Local only - Use Ollama for all inference (requires local setup)",
-            "Hybrid - Cloud brain for orchestration, local muscle for heavy code generation"
-          ],
-          "description": "Execution mode: cloud (HuggingFace), local (Ollama), or hybrid (smart routing)"
-        },
-        "liftoff.ollamaUrl": {
-          "type": "string",
-          "default": "http://localhost:11434",
-          "description": "URL for local Ollama instance"
-        },
-        "liftoff.ollamaModel": {
-          "type": "string",
-          "default": "qwen2.5-coder:7b-instruct-q5_K_M",
-          "enum": [
-            "devstral:latest",
-            "devstral:small",
-            "qwen2.5-coder:32b-instruct",
-            "qwen2.5-coder:14b-instruct",
-            "qwen2.5-coder:7b-instruct",
-            "qwen2.5-coder:7b-instruct-q5_K_M",
-            "deepseek-coder-v2:latest",
-            "codellama:34b-instruct",
-            "codellama:13b-instruct"
-          ],
-          "enumDescriptions": [
-            "Devstral - Mistral's coding model (recommended)",
-            "Devstral Small - Faster, lower VRAM",
-            "Qwen Coder 32B - Best quality (needs high VRAM)",
-            "Qwen Coder 14B - Good balance of speed/quality",
-            "Qwen Coder 7B - Fast, fits in 8GB VRAM",
-            "Qwen Coder 7B Q5 - Quantized for 8GB VRAM",
-            "DeepSeek Coder V2 - Alternative coding model",
-            "CodeLlama 34B - Meta's coding model",
-            "CodeLlama 13B - Smaller CodeLlama variant"
-          ],
-          "description": "Model for local Ollama execution"
-        },
-        "liftoff.hybridCloudThreshold": {
-          "type": "number",
-          "default": 100,
-          "description": "Estimated tokens below this threshold use cloud (for quick tasks)"
+        "liftoff.showAgentButtons": {
+          "type": "boolean",
+          "default": false,
+          "description": "Show individual agent type buttons (advanced)"
         }
       }
     }
@@ -188,12 +155,17 @@
     "vscode:prepublish": "npm run compile",
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
-    "lint": "eslint src --ext ts"
+    "lint": "eslint src",
+    "lint:fix": "eslint src --fix"
   },
   "devDependencies": {
+    "@eslint/js": "^9.39.1",
+    "@types/eslint": "^9.6.1",
     "@types/node": "^20.10.0",
     "@types/vscode": "^1.85.0",
-    "typescript": "^5.3.0"
+    "eslint": "^9.39.1",
+    "typescript": "^5.3.0",
+    "typescript-eslint": "^8.48.0"
   },
   "dependencies": {
     "playwright": "^1.40.0"

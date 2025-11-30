@@ -1,10 +1,21 @@
 // MCP Module - Model Context Protocol integration for Liftoff
-export { McpClient } from './client';
+export { McpClient, disposeMcpOutputChannel } from './client';
 export { McpRouter, getMcpRouter, disposeMcpRouter } from './router';
 export * from './types';
 
 // Unified Executor - Single 'execute' tool for 98% token reduction
 export { UnifiedExecutor, getUnifiedToolDescription, getExecuteToolSchema } from './unified-executor';
+
+// New Infrastructure (Phase 2 Refactor)
+export { McpServerManager, ServerConfig, ServerHealth, ServerStatus } from './server-manager';
+export { LocalMcpServer, McpTool as LocalMcpTool, McpToolResult } from './local-server';
+export {
+    EnhancedMcpRouter,
+    getEnhancedMcpRouter,
+    disposeEnhancedMcpRouter,
+    ExecutionOptions,
+    BatchResult,
+} from './enhanced-router';
 
 // Default MCP server configurations
 export const DEFAULT_MCP_CONFIGS = {

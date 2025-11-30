@@ -1,6 +1,6 @@
 // VS Code diagnostics tools for autonomous agents
 import * as vscode from 'vscode';
-import { Tool, ToolResult } from './index';
+import { Tool } from './index';
 
 export const VSCODE_TOOLS: Record<string, Tool> = {
     get_problems: {
@@ -10,7 +10,7 @@ export const VSCODE_TOOLS: Record<string, Tool> = {
             severity: { type: 'string', description: 'Filter: "error" | "warning" | "all" (default: all)' },
             limit: { type: 'number', description: 'Max problems to return (default: 50)' }
         },
-        async execute(params, workspaceRoot) {
+        async execute(params, _workspaceRoot) {
             try {
                 const allDiagnostics = vscode.languages.getDiagnostics();
                 const problems: Array<{

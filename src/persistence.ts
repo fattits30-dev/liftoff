@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
-import * as fs from 'fs';
+import * as fs from 'fs/promises';
 import * as path from 'path';
-import { Agent } from './agentManager';
+import { Agent } from './autonomousAgent';
 import { Artifact, AgentMessage } from './agentCommunication';
 
 export interface SessionHistory {
@@ -27,16 +27,25 @@ export interface AgentRecord {
 export class PersistenceManager {
     private historyDir: string;
     private currentSession: SessionHistory;
+    private outputChannel: vscode.OutputChannel;
+    private saveScheduled: boolean = false;
+    private saveTimer: NodeJS.Timeout | null = null;
+    private disposed: boolean = false;
     
     constructor(context: vscode.ExtensionContext) {
         this.historyDir = path.join(context.globalStorageUri.fsPath, 'history');
-        this.ensureHistoryDir();
+        this.outputChannel = vscode.window.createOutputChannel('Liftoff Persistence');
         this.currentSession = this.createSession();
+        
+        // Ensure directory exists asynchronously
+        this.ensureHistoryDir();
     }
     
-    private ensureHistoryDir(): void {
-        if (!fs.existsSync(this.historyDir)) {
-            fs.mkdirSync(this.historyDir, { recursive: true });
+    private async ensureHistoryDir(): Promise<void> {
+        try {
+            await fs.mkdir(this.historyDir, { recursive: true });
+        } catch (err: any) {
+            this.log(`Failed to create history directory: ${err.message}`);
         }
     }
     
@@ -53,6 +62,8 @@ export class PersistenceManager {
     }
     
     recordAgent(agent: Agent): void {
+        if (this.disposed) return;
+        
         const record: AgentRecord = {
             id: agent.id,
             type: agent.type,
@@ -73,58 +84,112 @@ export class PersistenceManager {
             this.currentSession.agents.push(record);
         }
         
-        this.saveCurrentSession();
+        this.scheduleSave();
     }
 
     recordArtifact(artifact: Artifact): void {
+        if (this.disposed) return;
         this.currentSession.artifacts.push(artifact);
-        this.saveCurrentSession();
+        this.scheduleSave();
     }
     
     recordMessage(message: AgentMessage): void {
+        if (this.disposed) return;
         this.currentSession.messages.push(message);
-        this.saveCurrentSession();
+        this.scheduleSave();
     }
     
-    private saveCurrentSession(): void {
-        const filePath = path.join(this.historyDir, `${this.currentSession.id}.json`);
-        fs.writeFileSync(filePath, JSON.stringify(this.currentSession, null, 2));
+    /**
+     * Schedule a debounced save to prevent rapid writes
+     */
+    private scheduleSave(): void {
+        if (this.saveScheduled || this.disposed) return;
+        
+        this.saveScheduled = true;
+        this.saveTimer = setTimeout(() => {
+            this.saveCurrentSession().finally(() => {
+                this.saveScheduled = false;
+                this.saveTimer = null;
+            });
+        }, 1000); // Debounce: save at most once per second
     }
     
-    endSession(): void {
+    private async saveCurrentSession(): Promise<void> {
+        if (this.disposed) return;
+        
+        try {
+            const filePath = path.join(this.historyDir, `${this.currentSession.id}.json`);
+            await fs.writeFile(filePath, JSON.stringify(this.currentSession, null, 2));
+        } catch (err: any) {
+            this.log(`Failed to save session: ${err.message}`);
+        }
+    }
+    
+    async endSession(): Promise<void> {
         this.currentSession.endTime = Date.now();
-        this.saveCurrentSession();
+        await this.saveCurrentSession();
         this.currentSession = this.createSession();
     }
     
-    getSessionHistory(): SessionHistory[] {
-        const files = fs.readdirSync(this.historyDir).filter(f => f.endsWith('.json'));
-        return files.map(f => {
-            const content = fs.readFileSync(path.join(this.historyDir, f), 'utf-8');
-            return JSON.parse(content) as SessionHistory;
-        }).sort((a, b) => b.startTime - a.startTime);
+    async getSessionHistory(): Promise<SessionHistory[]> {
+        try {
+            const files = await fs.readdir(this.historyDir);
+            const sessions: SessionHistory[] = [];
+            
+            for (const file of files) {
+                if (file.endsWith('.json')) {
+                    try {
+                        const data = await fs.readFile(path.join(this.historyDir, file), 'utf-8');
+                        sessions.push(JSON.parse(data));
+                    } catch {
+                        // Skip corrupted files
+                    }
+                }
+            }
+            
+            return sessions.sort((a, b) => b.startTime - a.startTime);
+        } catch {
+            return [];
+        }
+    }
+    
+    // Sync version for backward compatibility (deprecated)
+    getAllSessions(): SessionHistory[] {
+        // Return empty - callers should migrate to async getSessionHistory()
+        this.log('Warning: getAllSessions() is deprecated, use getSessionHistory() instead');
+        return [];
+    }
+    
+    async getSession(sessionId: string): Promise<SessionHistory | null> {
+        try {
+            const filePath = path.join(this.historyDir, `${sessionId}.json`);
+            const data = await fs.readFile(filePath, 'utf-8');
+            return JSON.parse(data);
+        } catch {
+            return null;
+        }
     }
 
-    // Alias for getSessionHistory
-    getAllSessions(): SessionHistory[] {
-        return this.getSessionHistory();
+    /**
+     * Force save (for shutdown)
+     */
+    async flush(): Promise<void> {
+        await this.saveCurrentSession();
+    }
+
+    private log(msg: string): void {
+        this.outputChannel.appendLine(`[Persistence] ${msg}`);
     }
     
-    getSession(id: string): SessionHistory | null {
-        const filePath = path.join(this.historyDir, `${id}.json`);
-        if (fs.existsSync(filePath)) {
-            const content = fs.readFileSync(filePath, 'utf-8');
-            return JSON.parse(content);
+    dispose(): void {
+        this.disposed = true;
+        if (this.saveTimer) {
+            clearTimeout(this.saveTimer);
+            this.saveTimer = null;
         }
-        return null;
-    }
-    
-    getCurrentSession(): SessionHistory {
-        return this.currentSession;
-    }
-    
-    clearHistory(): void {
-        const files = fs.readdirSync(this.historyDir);
-        files.forEach(f => fs.unlinkSync(path.join(this.historyDir, f)));
+        this.saveScheduled = false;
+        // Fire off final save but don't wait
+        this.saveCurrentSession().catch(() => {});
+        this.outputChannel.dispose();
     }
 }

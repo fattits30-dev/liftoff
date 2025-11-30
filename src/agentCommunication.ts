@@ -1,4 +1,4 @@
-import * as vscode from 'vscode';
+// Agent communication not dependent on vscode for now
 import { EventEmitter } from 'events';
 
 export interface Artifact {

@@ -19,7 +19,13 @@
       "WebFetch(domain:www.anthropic.com)",
       "WebFetch(domain:blog.cloudflare.com)",
       "mcp__serena__replace_symbol_body",
-      "WebFetch(domain:best.openssf.org)"
+      "WebFetch(domain:best.openssf.org)",
+      "mcp__serena__find_file",
+      "mcp__context7__resolve-library-id",
+      "mcp__serena__read_memory",
+      "mcp__serena__think_about_collected_information",
+      "mcp__context7__get-library-docs",
+      "mcp__serena__execute_shell_command"
     ],
     "deny": [],
     "ask": []

@@ -2,6 +2,7 @@
 import { spawn, ChildProcess } from 'child_process';
 import { EventEmitter } from 'events';
 import * as readline from 'readline';
+import * as vscode from 'vscode';
 import {
     JsonRpcRequest,
     JsonRpcResponse,
@@ -12,6 +13,21 @@ import {
     McpServerCapabilities
 } from './types';
 
+// Shared output channel for all MCP clients
+let mcpOutputChannel: vscode.OutputChannel | null = null;
+
+function getMcpOutputChannel(): vscode.OutputChannel {
+    if (!mcpOutputChannel) {
+        mcpOutputChannel = vscode.window.createOutputChannel('Liftoff MCP');
+    }
+    return mcpOutputChannel;
+}
+
+export function disposeMcpOutputChannel(): void {
+    mcpOutputChannel?.dispose();
+    mcpOutputChannel = null;
+}
+
 export class McpClient extends EventEmitter {
     private process: ChildProcess | null = null;
     private requestId = 0;
@@ -21,6 +37,7 @@ export class McpClient extends EventEmitter {
     }>();
     private readline: readline.Interface | null = null;
     private buffer = '';
+    private outputChannel: vscode.OutputChannel;
 
     public serverInfo: { name: string; version: string } | null = null;
     public capabilities: McpServerCapabilities | null = null;
@@ -29,6 +46,11 @@ export class McpClient extends EventEmitter {
 
     constructor(public readonly config: McpServerConfig) {
         super();
+        this.outputChannel = getMcpOutputChannel();
+    }
+    
+    private log(message: string): void {
+        this.outputChannel.appendLine(`[MCP:${this.config.name}] ${message}`);
     }
 
     async connect(): Promise<void> {
@@ -68,19 +90,19 @@ export class McpClient extends EventEmitter {
                 this.process.stderr?.on('data', (data) => {
                     const msg = data.toString().trim();
                     if (msg) {
-                        console.error(`[MCP:${this.config.name}] stderr:`, msg);
+                        this.log(`stderr: ${msg}`);
                     }
                 });
 
                 // Handle process exit
                 this.process.on('exit', (code) => {
-                    console.log(`[MCP:${this.config.name}] Process exited with code ${code}`);
+                    this.log(`Process exited with code ${code}`);
                     this.status = 'disconnected';
                     this.emit('disconnected');
                 });
 
                 this.process.on('error', (err) => {
-                    console.error(`[MCP:${this.config.name}] Process error:`, err);
+                    this.log(`Process error: ${err.message}`);
                     this.status = 'error';
                     reject(err);
                 });
@@ -123,9 +145,9 @@ export class McpClient extends EventEmitter {
                     }
                 }
             }
-        } catch (err) {
+        } catch (_err) {
             // Not valid JSON - might be debug output
-            console.log(`[MCP:${this.config.name}] Non-JSON output:`, line);
+            this.log(`Non-JSON output: ${line}`);
         }
     }
 
@@ -187,14 +209,14 @@ export class McpClient extends EventEmitter {
         };
         this.process!.stdin!.write(JSON.stringify(notification) + '\n');
 
-        console.log(`[MCP:${this.config.name}] Connected to ${result.serverInfo.name} v${result.serverInfo.version}`);
+        this.log(`Connected to ${result.serverInfo.name} v${result.serverInfo.version}`);
         return result;
     }
 
     async listTools(): Promise<McpTool[]> {
         const result = await this.sendRequest('tools/list');
         this.tools = result.tools || [];
-        console.log(`[MCP:${this.config.name}] Found ${this.tools.length} tools`);
+        this.log(`Found ${this.tools.length} tools`);
         return this.tools;
     }
 

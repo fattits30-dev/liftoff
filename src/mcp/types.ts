@@ -109,4 +109,5 @@ export interface ToolCallResult {
     output: string;
     error?: string;
     server?: string;
+    duration?: number;  // Execution time in ms
 }

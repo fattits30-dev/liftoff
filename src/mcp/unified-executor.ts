@@ -21,11 +21,23 @@
  */
 
 import * as fs from 'fs';
+import * as fsPromises from 'fs/promises';
 import * as nodePath from 'path';
 import { execSync, spawn } from 'child_process';
 import * as vm from 'vm';
 import * as vscode from 'vscode';
-import { SafetyGuardrails, getSafetyRulesForPrompt } from '../safety/guardrails';
+import { SafetyGuardrails } from '../safety/guardrails';
+import { 
+    detectProjectInfo, 
+    scaffoldProject, 
+    ALL_TEMPLATES, 
+    getAppDevPromptSection,
+    DatabaseTools,
+    DeploymentTools,
+    EnvManager
+} from '../tools/appDev';
+import { GitHubClient } from '../tools/github';
+import { CICDGenerator } from '../tools/cicd';
 
 // ============================================================================
 // Types
@@ -41,6 +53,12 @@ export interface ExecutionResult {
     result?: any;
     error?: string;
     duration: number;
+    // Editor stats for file operations
+    linesAdded?: number;
+    linesRemoved?: number;
+    filePath?: string;
+    // Browser automation
+    screenshot?: string; // base64 encoded screenshot
 }
 
 export interface ElementInfo {
@@ -120,19 +138,44 @@ class BrowserManager {
     private browser: any = null;
     private page: any = null;
     private playwright: any = null;
+    private idleTimeout: NodeJS.Timeout | null = null;
+    private static readonly IDLE_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
 
     async ensureBrowser(): Promise<any> {
+        // Reset idle timeout on each use
+        this.resetIdleTimeout();
+        
         if (!this.browser) {
             try {
                 // Dynamic import to avoid requiring playwright if not used
                 this.playwright = await import('playwright');
-                this.browser = await this.playwright.chromium.launch({ headless: true });
+                this.browser = await this.playwright.chromium.launch({ 
+                    headless: true,
+                    timeout: 30000 // 30 second launch timeout
+                });
                 this.page = await this.browser.newPage();
+                
+                // Handle browser disconnect gracefully
+                this.browser.on('disconnected', () => {
+                    this.browser = null;
+                    this.page = null;
+                });
             } catch (err: any) {
+                this.browser = null;
+                this.page = null;
                 throw new Error(`Browser init failed (install playwright): ${err.message}`);
             }
         }
         return this.page;
+    }
+    
+    private resetIdleTimeout(): void {
+        if (this.idleTimeout) {
+            clearTimeout(this.idleTimeout);
+        }
+        this.idleTimeout = setTimeout(() => {
+            this.close().catch(() => {}); // Auto-close after idle
+        }, BrowserManager.IDLE_TIMEOUT_MS);
     }
 
     async navigate(url: string): Promise<void> {
@@ -180,10 +223,21 @@ class BrowserManager {
     }
 
     async close(): Promise<void> {
+        // Clear idle timeout
+        if (this.idleTimeout) {
+            clearTimeout(this.idleTimeout);
+            this.idleTimeout = null;
+        }
+        
         if (this.browser) {
-            await this.browser.close();
-            this.browser = null;
-            this.page = null;
+            try {
+                await this.browser.close();
+            } catch (_err) {
+                // Browser may already be closed, ignore
+            } finally {
+                this.browser = null;
+                this.page = null;
+            }
         }
     }
 }
@@ -222,7 +276,7 @@ function createVSCodeAPI() {
             });
         },
 
-        showDiff: (original: string, modified: string): void => {
+        showDiff: (_original: string, _modified: string): void => {
             const originalUri = vscode.Uri.parse(`untitled:Original`);
             const modifiedUri = vscode.Uri.parse(`untitled:Modified`);
             vscode.commands.executeCommand('vscode.diff', originalUri, modifiedUri, 'Diff');
@@ -252,30 +306,69 @@ function createVSCodeAPI() {
 }
 
 // ============================================================================
+// Execution Stats Tracker
+// ============================================================================
+
+interface FileStats {
+    linesAdded: number;
+    linesRemoved: number;
+    filePath: string;
+}
+
+interface ExecutionStats {
+    fileChanges: FileStats[];
+    lastScreenshot: string | null;
+}
+
+function calculateLineDiff(original: string, modified: string): { added: number; removed: number } {
+    const origLines = original ? original.split('\n') : [];
+    const modLines = modified ? modified.split('\n') : [];
+
+    // For a more accurate diff, we compare line by line
+    const origSet = new Set(origLines);
+    const modSet = new Set(modLines);
+    
+    let added = 0;
+    let removed = 0;
+    
+    // Lines in modified but not in original = added
+    for (const line of modLines) {
+        if (!origSet.has(line)) added++;
+    }
+    
+    // Lines in original but not in modified = removed
+    for (const line of origLines) {
+        if (!modSet.has(line)) removed++;
+    }
+    
+    return { added, removed };
+}
+
+// ============================================================================
 // Sandbox Factory
 // ============================================================================
 
-function createSandbox(workspaceRoot: string, browserManager: BrowserManager, guardrails: SafetyGuardrails) {
+function createSandbox(workspaceRoot: string, browserManager: BrowserManager, guardrails: SafetyGuardrails, stats: ExecutionStats) {
     const homeDir = process.env.HOME || process.env.USERPROFILE || '';
 
     return {
-        // File System API (with security)
+        // File System API (with security) - All async to prevent blocking extension host
         fs: {
-            read: (filePath: string): string => {
+            read: async (filePath: string): Promise<string> => {
                 try {
                     const fullPath = validatePath(filePath, workspaceRoot, 'read');
-                    return fs.readFileSync(fullPath, 'utf-8');
+                    return await fsPromises.readFile(fullPath, 'utf-8');
                 } catch (err: any) {
                     throw new Error(`Failed to read ${filePath}: ${err.message}`);
                 }
             },
 
-            write: (filePath: string, content: string): string => {
+            write: async (filePath: string, content: string): Promise<string> => {
                 try {
                     const fullPath = validatePath(filePath, workspaceRoot, 'write');
 
                     // Safety check: Rate limiting and protected file check
-                    const safetyCheck = guardrails.checkFileOperation(filePath, 'write');
+                    const safetyCheck = await guardrails.checkFileOperation(filePath, 'write');
                     if (!safetyCheck.allowed) {
                         throw new Error(`Safety blocked: ${safetyCheck.reason}`);
                     }
@@ -283,85 +376,108 @@ function createSandbox(workspaceRoot: string, browserManager: BrowserManager, gu
                         throw new Error(`Protected file requires confirmation: ${filePath}. Use fs.writeForce() if you're sure.`);
                     }
 
-                    // Backup existing file before modification
-                    if (fs.existsSync(fullPath)) {
-                        guardrails.backupFile(fullPath);
+                    // Read original content for diff calculation
+                    let originalContent = '';
+                    const exists = await fsPromises.access(fullPath).then(() => true).catch(() => false);
+                    if (exists) {
+                        originalContent = await fsPromises.readFile(fullPath, 'utf-8');
+                        await guardrails.backupFile(fullPath);
                     }
 
                     // Validate syntax before writing
-                    const validation = guardrails.validateSyntax(filePath, content);
+                    const validation = await guardrails.validateSyntax(filePath, content);
                     if (!validation.valid) {
                         throw new Error(`Syntax validation failed:\n${validation.errors.join('\n')}`);
                     }
 
                     // Analyze diff for potential issues
-                    if (fs.existsSync(fullPath)) {
-                        const original = fs.readFileSync(fullPath, 'utf-8');
-                        const issues = guardrails.analyzeDiff(original, content);
+                    if (exists && originalContent) {
+                        const issues = guardrails.analyzeDiff(originalContent, content);
                         if (issues.length > 0) {
-                            // Log warnings but don't block
                             console.warn(`[SafetyWarning] ${filePath}:\n${issues.join('\n')}`);
                         }
                     }
 
                     // Write file
-                    fs.mkdirSync(nodePath.dirname(fullPath), { recursive: true });
-                    fs.writeFileSync(fullPath, content, 'utf-8');
-                    return `Written ${content.length} bytes to ${filePath}`;
+                    await fsPromises.mkdir(nodePath.dirname(fullPath), { recursive: true });
+                    await fsPromises.writeFile(fullPath, content, 'utf-8');
+
+                    // Track line changes
+                    const diff = calculateLineDiff(originalContent, content);
+                    stats.fileChanges.push({
+                        filePath: filePath,
+                        linesAdded: diff.added,
+                        linesRemoved: diff.removed
+                    });
+
+                    return `Written ${content.length} bytes to ${filePath} (+${diff.added}/-${diff.removed} lines)`;
                 } catch (err: any) {
                     throw new Error(`Failed to write ${filePath}: ${err.message}`);
                 }
             },
 
             // Force write (bypasses confirmation for protected files, but still validates syntax)
-            writeForce: (filePath: string, content: string): string => {
+            writeForce: async (filePath: string, content: string): Promise<string> => {
                 try {
                     const fullPath = validatePath(filePath, workspaceRoot, 'write');
 
                     // Still validate syntax even for forced writes
-                    const validation = guardrails.validateSyntax(filePath, content);
+                    const validation = await guardrails.validateSyntax(filePath, content);
                     if (!validation.valid) {
                         throw new Error(`Syntax validation failed:\n${validation.errors.join('\n')}`);
                     }
 
-                    // Backup existing file before modification
-                    if (fs.existsSync(fullPath)) {
-                        guardrails.backupFile(fullPath);
+                    // Read original for diff
+                    let originalContent = '';
+                    const exists = await fsPromises.access(fullPath).then(() => true).catch(() => false);
+                    if (exists) {
+                        originalContent = await fsPromises.readFile(fullPath, 'utf-8');
+                        await guardrails.backupFile(fullPath);
                     }
 
-                    fs.mkdirSync(nodePath.dirname(fullPath), { recursive: true });
-                    fs.writeFileSync(fullPath, content, 'utf-8');
-                    return `[FORCE] Written ${content.length} bytes to ${filePath}`;
+                    await fsPromises.mkdir(nodePath.dirname(fullPath), { recursive: true });
+                    await fsPromises.writeFile(fullPath, content, 'utf-8');
+
+                    // Track line changes
+                    const diff = calculateLineDiff(originalContent, content);
+                    stats.fileChanges.push({
+                        filePath: filePath,
+                        linesAdded: diff.added,
+                        linesRemoved: diff.removed
+                    });
+
+                    return `[FORCE] Written ${content.length} bytes to ${filePath} (+${diff.added}/-${diff.removed} lines)`;
                 } catch (err: any) {
                     throw new Error(`Failed to write ${filePath}: ${err.message}`);
                 }
             },
 
             // Restore file from backup
-            restore: (filePath: string): string => {
-                if (guardrails.restoreFile(filePath)) {
+            restore: async (filePath: string): Promise<string> => {
+                if (await guardrails.restoreFile(filePath)) {
                     return `Restored ${filePath} from backup`;
                 }
                 throw new Error(`No backup found for ${filePath}`);
             },
 
-            exists: (filePath: string): boolean => {
+            exists: async (filePath: string): Promise<boolean> => {
                 try {
                     const fullPath = validatePath(filePath, workspaceRoot, 'read');
-                    return fs.existsSync(fullPath);
+                    await fsPromises.access(fullPath);
+                    return true;
                 } catch {
                     return false;
                 }
             },
 
-            list: (dirPath: string = '.', options?: { recursive?: boolean }): string[] => {
+            list: async (dirPath: string = '.', options?: { recursive?: boolean }): Promise<string[]> => {
                 const fullPath = validatePath(dirPath, workspaceRoot, 'read');
 
                 if (options?.recursive) {
                     const results: string[] = [];
-                    const walk = (dir: string, prefix: string = '') => {
+                    const walk = async (dir: string, prefix: string = ''): Promise<void> => {
                         try {
-                            const entries = fs.readdirSync(dir, { withFileTypes: true });
+                            const entries = await fsPromises.readdir(dir, { withFileTypes: true });
                             for (const entry of entries) {
                                 // Skip protected and hidden directories
                                 if (entry.name.startsWith('.') || isProtectedPath(entry.name)) {
@@ -370,50 +486,52 @@ function createSandbox(workspaceRoot: string, browserManager: BrowserManager, gu
 
                                 const relPath = prefix ? `${prefix}/${entry.name}` : entry.name;
                                 if (entry.isDirectory()) {
-                                    walk(nodePath.join(dir, entry.name), relPath);
+                                    await walk(nodePath.join(dir, entry.name), relPath);
                                 } else {
                                     results.push(relPath);
                                 }
                             }
                         } catch {}
                     };
-                    walk(fullPath);
+                    await walk(fullPath);
                     return results;
                 }
 
-                return fs.readdirSync(fullPath).filter(f => !isProtectedPath(f));
+                const entries = await fsPromises.readdir(fullPath);
+                return entries.filter(f => !isProtectedPath(f));
             },
 
-            delete: (filePath: string): string => {
+            delete: async (filePath: string): Promise<string> => {
                 const fullPath = validatePath(filePath, workspaceRoot, 'write');
 
                 // Safety check: Rate limiting
-                const safetyCheck = guardrails.checkFileOperation(filePath, 'delete');
+                const safetyCheck = await guardrails.checkFileOperation(filePath, 'delete');
                 if (!safetyCheck.allowed) {
                     throw new Error(`Safety blocked: ${safetyCheck.reason}`);
                 }
 
                 // Backup before delete
-                if (fs.existsSync(fullPath)) {
-                    guardrails.backupFile(fullPath);
+                const exists = await fsPromises.access(fullPath).then(() => true).catch(() => false);
+                if (exists) {
+                    await guardrails.backupFile(fullPath);
                 }
 
-                fs.unlinkSync(fullPath);
+                await fsPromises.unlink(fullPath);
                 return `Deleted ${filePath}`;
             },
 
-            mkdir: (dirPath: string): void => {
+            mkdir: async (dirPath: string): Promise<void> => {
                 const fullPath = validatePath(dirPath, workspaceRoot, 'write');
-                fs.mkdirSync(fullPath, { recursive: true });
+                await fsPromises.mkdir(fullPath, { recursive: true });
             },
 
-            search: (pattern: RegExp, dir: string = '.'): Array<{ file: string; line: number; match: string }> => {
+            search: async (pattern: RegExp, dir: string = '.'): Promise<Array<{ file: string; line: number; match: string }>> => {
                 const results: Array<{ file: string; line: number; match: string }> = [];
                 const fullPath = validatePath(dir, workspaceRoot, 'read');
 
-                const searchDir = (currentDir: string, prefix: string = '') => {
+                const searchDir = async (currentDir: string, prefix: string = ''): Promise<void> => {
                     try {
-                        const entries = fs.readdirSync(currentDir, { withFileTypes: true });
+                        const entries = await fsPromises.readdir(currentDir, { withFileTypes: true });
                         for (const entry of entries) {
                             if (entry.name.startsWith('.') || isProtectedPath(entry.name)) {
                                 continue;
@@ -423,10 +541,10 @@ function createSandbox(workspaceRoot: string, browserManager: BrowserManager, gu
                             const relPath = prefix ? `${prefix}/${entry.name}` : entry.name;
 
                             if (entry.isDirectory()) {
-                                searchDir(entryPath, relPath);
+                                await searchDir(entryPath, relPath);
                             } else if (entry.isFile()) {
                                 try {
-                                    const content = fs.readFileSync(entryPath, 'utf-8');
+                                    const content = await fsPromises.readFile(entryPath, 'utf-8');
                                     const lines = content.split('\n');
                                     lines.forEach((line, i) => {
                                         if (pattern.test(line)) {
@@ -443,11 +561,11 @@ function createSandbox(workspaceRoot: string, browserManager: BrowserManager, gu
                     } catch {}
                 };
 
-                searchDir(fullPath);
+                await searchDir(fullPath);
                 return results;
             },
 
-            readHome: (relativePath: string): string => {
+            readHome: async (relativePath: string): Promise<string> => {
                 if (!homeDir) {
                     throw new Error('Home directory not available');
                 }
@@ -459,7 +577,7 @@ function createSandbox(workspaceRoot: string, browserManager: BrowserManager, gu
                 if (isProtectedPath(fullPath)) {
                     throw new Error('Access denied: protected path');
                 }
-                return fs.readFileSync(fullPath, 'utf-8');
+                return await fsPromises.readFile(fullPath, 'utf-8');
             }
         },
 
@@ -500,6 +618,12 @@ function createSandbox(workspaceRoot: string, browserManager: BrowserManager, gu
             },
 
             runAsync: (command: string): Promise<string> => {
+                // Safety check: Block dangerous commands (same as sync version)
+                const cmdCheck = guardrails.checkCommand(command);
+                if (!cmdCheck.allowed) {
+                    return Promise.reject(new Error(`Dangerous command blocked: ${cmdCheck.reason}`));
+                }
+                
                 return new Promise((resolve) => {
                     const proc = spawn(command, { shell: true, cwd: workspaceRoot });
                     let output = '';
@@ -577,12 +701,34 @@ function createSandbox(workspaceRoot: string, browserManager: BrowserManager, gu
             return response.text();
         },
 
-        // Browser API (lazy initialized)
+        // Browser API (lazy initialized) - tracks screenshots
+        // Auto-captures screenshot after navigate/click for live preview
         browser: {
-            navigate: (url: string) => browserManager.navigate(url),
-            click: (selector: string) => browserManager.click(selector),
+            navigate: async (url: string) => {
+                await browserManager.navigate(url);
+                // Auto-capture for live preview
+                try {
+                    const screenshot = await browserManager.screenshot();
+                    stats.lastScreenshot = screenshot;
+                } catch { /* ignore screenshot failures */ }
+            },
+            click: async (selector: string) => {
+                await browserManager.click(selector);
+                // Auto-capture after click for live preview
+                try {
+                    const screenshot = await browserManager.screenshot();
+                    stats.lastScreenshot = screenshot;
+                } catch { /* ignore screenshot failures */ }
+            },
             type: (selector: string, text: string) => browserManager.type(selector, text),
-            screenshot: (path?: string) => browserManager.screenshot(path),
+            screenshot: async (path?: string) => {
+                const result = await browserManager.screenshot(path);
+                // If no path provided, result is base64 - save to stats
+                if (!path && result) {
+                    stats.lastScreenshot = result;
+                }
+                return result;
+            },
             getText: (selector: string) => browserManager.getText(selector),
             getElements: (selector: string) => browserManager.getElements(selector),
             waitFor: (selector: string, timeout?: number) => browserManager.waitFor(selector, timeout),
@@ -696,6 +842,161 @@ function createSandbox(workspaceRoot: string, browserManager: BrowserManager, gu
         // VS Code API
         vscode: createVSCodeAPI(),
 
+        // App Development Tools
+        project: {
+            // Detect project info (framework, package manager, etc.)
+            detect: async () => await detectProjectInfo(workspaceRoot),
+            
+            // Create new project from template
+            scaffold: async (template: string, name: string) => 
+                await scaffoldProject(workspaceRoot, template, name),
+            
+            // List available templates
+            templates: () => Object.entries(ALL_TEMPLATES).map(([key, t]) => ({
+                id: key,
+                name: t.name,
+                description: t.description,
+                framework: t.framework
+            })),
+
+            // Get framework-specific guidance
+            guide: async () => {
+                const info = await detectProjectInfo(workspaceRoot);
+                return getAppDevPromptSection(info);
+            }
+        },
+
+        // Database Tools (Prisma, SQL)
+        db: (() => {
+            const dbTools = new DatabaseTools(workspaceRoot);
+            return {
+                detect: () => dbTools.detectDatabase(),
+                prisma: (cmd: 'generate' | 'push' | 'migrate' | 'studio' | 'seed', args?: string) => 
+                    dbTools.prisma(cmd, args),
+                migrate: (name: string) => dbTools.createMigration(name),
+                generate: () => dbTools.generateClient(),
+                studio: () => dbTools.openStudio(),
+                query: (sql: string) => dbTools.query(sql)
+            };
+        })(),
+
+        // Deployment Tools (Docker, Vercel)
+        deploy: (() => {
+            const deployTools = new DeploymentTools(workspaceRoot);
+            return {
+                dockerfile: (type: 'node' | 'python' | 'next' = 'node') => 
+                    deployTools.generateDockerfile(type),
+                compose: (options?: { services?: ('app' | 'postgres' | 'redis')[]; appPort?: number }) => 
+                    deployTools.generateDockerCompose(options),
+                vercelConfig: () => deployTools.generateVercelConfig(),
+                vercel: (production: boolean = false) => deployTools.deployVercel(production),
+                dockerBuild: (tag: string = 'app:latest') => deployTools.buildDocker(tag),
+                dockerRun: (tag: string = 'app:latest', port: number = 3000) => 
+                    deployTools.runDocker(tag, port),
+                composeUp: (detached: boolean = true) => deployTools.composeUp(detached),
+                composeDown: () => deployTools.composeDown()
+            };
+        })(),
+
+        // Environment Management
+        env: (() => {
+            const envManager = new EnvManager(workspaceRoot);
+            return {
+                template: () => envManager.listEnvTemplate(),
+                missing: () => envManager.checkMissingEnv(),
+                create: () => envManager.createEnvFromExample(),
+                set: (key: string, value: string) => envManager.setEnvVar(key, value),
+                generateExample: () => envManager.generateEnvExample()
+            };
+        })(),
+
+        // GitHub Integration
+        github: (() => {
+            const client = new GitHubClient({});
+            return {
+                // Setup
+                setToken: (token: string) => { 
+                    (client as any).token = token;
+                    return 'Token set';
+                },
+                setRepo: (owner: string, repo: string) => {
+                    client.setRepo(owner, repo);
+                    return `Set repo to ${owner}/${repo}`;
+                },
+                
+                // Repository
+                getRepo: (owner?: string, repo?: string) => client.getRepo(owner, repo),
+                listRepos: (username?: string) => client.listRepos(username),
+                createRepo: (name: string, options?: { description?: string; private?: boolean }) => 
+                    client.createRepo(name, options),
+                
+                // Issues
+                listIssues: (state?: 'open' | 'closed' | 'all') => client.listIssues(state),
+                getIssue: (number: number) => client.getIssue(number),
+                createIssue: (title: string, body?: string, labels?: string[]) => 
+                    client.createIssue(title, body, labels),
+                updateIssue: (number: number, updates: { title?: string; body?: string; state?: 'open' | 'closed' }) =>
+                    client.updateIssue(number, updates),
+                addComment: (issueNumber: number, body: string) => client.addComment(issueNumber, body),
+                
+                // Pull Requests
+                listPRs: (state?: 'open' | 'closed' | 'all') => client.listPullRequests(state),
+                createPR: (title: string, head: string, base: string, body?: string) =>
+                    client.createPullRequest(title, head, base, body),
+                mergePR: (number: number, method?: 'merge' | 'squash' | 'rebase') =>
+                    client.mergePullRequest(number, method),
+                
+                // Branches
+                listBranches: () => client.listBranches(),
+                createBranch: (name: string, from?: string) => client.createBranch(name, from),
+                deleteBranch: (name: string) => client.deleteBranch(name),
+                
+                // Actions
+                listWorkflows: () => client.listWorkflows(),
+                listRuns: (workflowId?: number) => client.listWorkflowRuns(workflowId),
+                triggerWorkflow: (workflowId: number | string, ref: string, inputs?: Record<string, string>) =>
+                    client.triggerWorkflow(workflowId, ref, inputs),
+                
+                // Releases
+                listReleases: () => client.listReleases(),
+                createRelease: (tagName: string, options?: { name?: string; body?: string; draft?: boolean; prerelease?: boolean }) =>
+                    client.createRelease(tagName, options),
+                
+                // Files
+                getFile: (path: string, ref?: string) => client.getFileContent(path, ref),
+                updateFile: (path: string, content: string, message: string, branch?: string) =>
+                    client.createOrUpdateFile(path, content, message, branch),
+                
+                // Search
+                searchCode: (query: string) => client.searchCode(query),
+                searchIssues: (query: string) => client.searchIssues(query)
+            };
+        })(),
+
+        // CI/CD Workflow Generation
+        cicd: (() => {
+            const generator = new CICDGenerator(workspaceRoot);
+            return {
+                generateCI: async (options?: { runTests?: boolean; runLint?: boolean; runBuild?: boolean }) => {
+                    const projectInfo = await detectProjectInfo(workspaceRoot);
+                    return generator.generateCI(projectInfo, options);
+                },
+                generateVercelDeploy: (branches?: string[]) => generator.generateVercelDeploy(branches),
+                generateDockerDeploy: (imageName: string, registry?: 'ghcr' | 'dockerhub') =>
+                    generator.generateDockerDeploy(imageName, registry),
+                generateRelease: () => generator.generateRelease(),
+                generateDependabot: () => generator.generateDependabot(),
+                generateGitLabCI: async (options?: { runTests?: boolean; runLint?: boolean; runBuild?: boolean }) => {
+                    const projectInfo = await detectProjectInfo(workspaceRoot);
+                    return generator.generateGitLabCI(projectInfo, options);
+                },
+                generateAll: async () => {
+                    const projectInfo = await detectProjectInfo(workspaceRoot);
+                    return generator.generateAll(projectInfo);
+                }
+            };
+        })(),
+
         // Utility functions
         path: {
             join: (...parts: string[]) => nodePath.join(...parts),
@@ -747,14 +1048,14 @@ export class UnifiedExecutor {
     /**
      * Create a checkpoint before making significant changes
      */
-    createCheckpoint(description: string): string {
+    async createCheckpoint(description: string): Promise<string> {
         return this.guardrails.createCheckpoint(description);
     }
 
     /**
      * Rollback to a previous checkpoint
      */
-    rollback(checkpointId: string): boolean {
+    async rollback(checkpointId: string): Promise<boolean> {
         return this.guardrails.rollback(checkpointId);
     }
 
@@ -772,13 +1073,95 @@ export class UnifiedExecutor {
         const startTime = Date.now();
         const effectiveTimeout = timeout || this.defaultTimeout;
 
+        // Initialize execution stats tracker
+        const stats: ExecutionStats = {
+            fileChanges: [],
+            lastScreenshot: null
+        };
+
         try {
-            const sandbox = createSandbox(this.workspaceRoot, this.browserManager, this.guardrails);
+            const sandbox = createSandbox(this.workspaceRoot, this.browserManager, this.guardrails, stats);
+
+            // Auto-add await to common async calls that agents often forget
+            // This makes the API more forgiving for LLM-generated code
+            let processedCode = code;
+            
+            // Pattern: variable = fs.read/write/etc without await
+            // Match: const/let/var name = fs.method( or shell.method( etc.
+            const asyncPatterns = [
+                /\b(const|let|var)\s+(\w+)\s*=\s*(fs\.(read|write|writeForce|exists|list|search|delete|mkdir|readHome))\s*\(/g,
+                /\b(const|let|var)\s+(\w+)\s*=\s*(shell\.(run|runAsync))\s*\(/g,
+                /\b(const|let|var)\s+(\w+)\s*=\s*(git\.(status|diff|log|commit|branch|checkout))\s*\(/g,
+                /\b(const|let|var)\s+(\w+)\s*=\s*(test\.(discover|run|runFile))\s*\(/g,
+                /\b(const|let|var)\s+(\w+)\s*=\s*(browser\.(navigate|click|type|screenshot|getText|getElements|waitFor|close))\s*\(/g,
+                /\b(const|let|var)\s+(\w+)\s*=\s*(db\.(detect|prisma|migrate|generate|studio|query))\s*\(/g,
+                /\b(const|let|var)\s+(\w+)\s*=\s*(deploy\.(dockerfile|compose|vercelConfig|vercel|dockerBuild|dockerRun|composeUp|composeDown))\s*\(/g,
+                /\b(const|let|var)\s+(\w+)\s*=\s*(env\.(template|missing|create|set|generateExample))\s*\(/g,
+                /\b(const|let|var)\s+(\w+)\s*=\s*(github\.\w+)\s*\(/g,
+                /\b(const|let|var)\s+(\w+)\s*=\s*(cicd\.\w+)\s*\(/g,
+                /\b(const|let|var)\s+(\w+)\s*=\s*(project\.(detect|scaffold|guide))\s*\(/g,
+                /\b(const|let|var)\s+(\w+)\s*=\s*(fetch)\s*\(/g,
+            ];
+
+            for (const pattern of asyncPatterns) {
+                // Only add await if it's not already there
+                processedCode = processedCode.replace(pattern, (match, declType, varName, funcCall) => {
+                    // Check if await is already present before this match
+                    const beforeMatch = processedCode.substring(0, processedCode.indexOf(match));
+                    const lastLine = beforeMatch.split('\n').pop() || '';
+                    if (lastLine.includes('await')) {
+                        return match; // Already has await
+                    }
+                    return `${declType} ${varName} = await ${funcCall}(`;
+                });
+            }
+
+            // Also handle return statements: return fs.read() -> return await fs.read()
+            const returnPatterns = [
+                /\breturn\s+(fs\.\w+)\s*\(/g,
+                /\breturn\s+(shell\.\w+)\s*\(/g,
+                /\breturn\s+(git\.\w+)\s*\(/g,
+                /\breturn\s+(test\.\w+)\s*\(/g,
+                /\breturn\s+(browser\.\w+)\s*\(/g,
+                /\breturn\s+(db\.\w+)\s*\(/g,
+                /\breturn\s+(deploy\.\w+)\s*\(/g,
+                /\breturn\s+(env\.\w+)\s*\(/g,
+                /\breturn\s+(github\.\w+)\s*\(/g,
+                /\breturn\s+(cicd\.\w+)\s*\(/g,
+                /\breturn\s+(project\.\w+)\s*\(/g,
+                /\breturn\s+(fetch)\s*\(/g,
+            ];
+
+            for (const pattern of returnPatterns) {
+                processedCode = processedCode.replace(pattern, (match, funcCall) => {
+                    if (match.includes('await')) return match;
+                    return `return await ${funcCall}(`;
+                });
+            }
+
+            // Handle chained calls: fs.list('.').filter(...) -> (await fs.list('.')).filter(...)
+            // Match: asyncFunc(...).method( where asyncFunc is one of our async APIs
+            const chainedPatterns = [
+                // fs.list('.').filter() -> (await fs.list('.')).filter()
+                /(?<!await\s)(?<!\(await\s)(fs\.(read|list|search|exists))\s*\(([^)]*)\)\s*\./g,
+                /(?<!await\s)(?<!\(await\s)(shell\.(run|runAsync))\s*\(([^)]*)\)\s*\./g,
+                /(?<!await\s)(?<!\(await\s)(git\.(status|diff|log|branch))\s*\(([^)]*)\)\s*\./g,
+                /(?<!await\s)(?<!\(await\s)(test\.(discover|run|runFile))\s*\(([^)]*)\)\s*\./g,
+                /(?<!await\s)(?<!\(await\s)(github\.\w+)\s*\(([^)]*)\)\s*\./g,
+                /(?<!await\s)(?<!\(await\s)(project\.(detect|templates))\s*\(([^)]*)\)\s*\./g,
+            ];
+
+            for (const pattern of chainedPatterns) {
+                processedCode = processedCode.replace(pattern, (match, funcCall, _method, args) => {
+                    // Wrap in (await ...).
+                    return `(await ${funcCall}(${args || ''})).`;
+                });
+            }
 
             // Wrap code to handle both sync and async, with explicit return
             const wrappedCode = `
                 (async () => {
-                    ${code}
+                    ${processedCode}
                 })()
             `;
 
@@ -801,7 +1184,15 @@ export class UnifiedExecutor {
                 Error,
                 Map,
                 Set,
-                // Explicitly NO: require, import, process, eval, Function
+                // Helpful error messages for common Node.js APIs that aren't available
+                require: () => { throw new Error('require() is not available. Use the sandbox APIs: fs.read(), fs.write(), shell.run(), etc.'); },
+                process: { 
+                    cwd: () => sandbox.workspace.root,
+                    env: {},  // Empty for security
+                },
+                // Common fs method aliases that redirect to sandbox.fs with helpful errors
+                __dirname: sandbox.workspace.root,
+                __filename: 'execute.js',
             });
 
             // Execute with timeout
@@ -810,10 +1201,21 @@ export class UnifiedExecutor {
                 timeout: effectiveTimeout
             });
 
+            // Aggregate stats from all file changes
+            const totalAdded = stats.fileChanges.reduce((sum, f) => sum + f.linesAdded, 0);
+            const totalRemoved = stats.fileChanges.reduce((sum, f) => sum + f.linesRemoved, 0);
+            const lastFilePath = stats.fileChanges.length > 0 
+                ? stats.fileChanges[stats.fileChanges.length - 1].filePath 
+                : undefined;
+
             return {
                 success: true,
                 result: result,
-                duration: Date.now() - startTime
+                duration: Date.now() - startTime,
+                linesAdded: totalAdded,
+                linesRemoved: totalRemoved,
+                filePath: lastFilePath,
+                screenshot: stats.lastScreenshot || undefined
             };
         } catch (err: any) {
             return {
@@ -841,51 +1243,78 @@ export function getUnifiedToolDescription(): string {
 
 **Available APIs:**
 \`\`\`
+# File System
 fs.read(path), fs.write(path, content), fs.writeForce(path, content), fs.restore(path)
 fs.list(dir, {recursive}), fs.exists(path), fs.search(regex, dir), fs.delete(path)
 fs.mkdir(path), fs.readHome(relativePath)
 
+# Shell & Git (local)
 shell.run(cmd, {cwd, timeout}), shell.runAsync(cmd)
-
 git.status(), git.diff(file?), git.log(n?), git.commit(msg), git.branch(), git.checkout(branch)
 
-test.discover(dir?) - List tests without running (fast)
-test.runFile(file) - Run single test file (2min timeout)
-test.run(pattern?, {timeout}) - Run tests matching pattern (3min timeout)
+# Testing
+test.discover(dir?), test.runFile(file), test.run(pattern?, {timeout})
 
-fetch(url, options) - HTTP requests, returns JSON or text
-
+# HTTP & Browser
+fetch(url, options)
 browser.navigate(url), browser.click(selector), browser.type(selector, text)
 browser.screenshot(path?), browser.getText(selector), browser.getElements(selector)
-browser.waitFor(selector, timeout?), browser.close()
 
-vscode.getProblems(), vscode.openFile(path, line?), vscode.getOpenFiles(), vscode.getSelection()
+# VS Code Integration
+vscode.getProblems(), vscode.openFile(path, line?), vscode.getOpenFiles()
 
+# Project Management
+project.detect(), project.templates(), project.scaffold(template, name), project.guide()
+
+# Database (Prisma)
+db.detect(), db.prisma(cmd, args?), db.migrate(name), db.generate(), db.studio(), db.query(sql)
+
+# Deployment
+deploy.dockerfile(type?), deploy.compose(options?), deploy.vercelConfig()
+deploy.vercel(production?), deploy.dockerBuild(tag?), deploy.composeUp(), deploy.composeDown()
+
+# Environment
+env.template(), env.missing(), env.create(), env.set(key, value), env.generateExample()
+
+# GitHub API (requires token)
+github.setToken(token), github.setRepo(owner, repo)
+github.getRepo(), github.listRepos(), github.createRepo(name, options?)
+github.listIssues(state?), github.getIssue(number), github.createIssue(title, body?, labels?)
+github.updateIssue(number, updates), github.addComment(issueNumber, body)
+github.listPRs(state?), github.createPR(title, head, base, body?), github.mergePR(number, method?)
+github.listBranches(), github.createBranch(name, from?), github.deleteBranch(name)
+github.listWorkflows(), github.listRuns(workflowId?), github.triggerWorkflow(id, ref, inputs?)
+github.listReleases(), github.createRelease(tagName, options?)
+github.getFile(path, ref?), github.updateFile(path, content, message, branch?)
+github.searchCode(query), github.searchIssues(query)
+
+# CI/CD Generation
+cicd.generateCI(options?) - GitHub Actions CI workflow
+cicd.generateVercelDeploy(branches?) - Vercel deployment workflow
+cicd.generateDockerDeploy(imageName, registry?) - Docker build & push workflow
+cicd.generateRelease() - Release workflow with changelog
+cicd.generateDependabot() - Dependabot config
+cicd.generateGitLabCI(options?) - GitLab CI config
+cicd.generateAll() - Generate all common CI/CD files
+
+# Utilities
 path.join(), path.dirname(), path.basename(), path.extname(), path.resolve()
 JSON.parse(), JSON.stringify()
 workspace.root, workspace.name, home
 \`\`\`
 
-**Safety Features (auto-enabled):**
-- Syntax validation: fs.write() validates syntax before writing (Python, TypeScript, JS, JSON, YAML)
-- Auto-backup: Files are backed up before modification. Use fs.restore(path) to revert
-- Rate limiting: Max 20 writes/min, 5 deletes/min
-- Protected files: .env, credentials, secrets require fs.writeForce()
-- Command safety: Dangerous commands (rm -rf, DROP TABLE) are blocked
+**Templates:** react-ts, next-ts, vue-ts, svelte-ts, express-ts, fastapi, flask, fullstack-next
 
-**SAFETY RULES:**
-1. READ files before modifying them - understand the full context
-2. Make minimal, focused changes - don't rewrite entire files for small fixes
-3. Check for syntax errors AFTER edits: vscode.getProblems()
-4. If you made a mistake, use fs.restore(path) to revert
-5. NEVER use string.replace() blindly - understand what you're replacing
-
-**Example:**
-\`\`\`tool
-{"name": "execute", "params": {"code": "return test.discover('backend/tests')"}}
+**GitHub Setup:**
+\`\`\`javascript
+github.setToken(process.env.GITHUB_TOKEN || 'ghp_...')
+github.setRepo('owner', 'repo')
+return github.listIssues('open')
 \`\`\`
-\`\`\`tool
-{"name": "execute", "params": {"code": "return test.runFile('backend/tests/test_api.py')"}}
+
+**CI/CD Quick Setup:**
+\`\`\`javascript
+return cicd.generateAll() // Creates ci.yml, dependabot.yml, release.yml
 \`\`\`
 
 Use \`return\` for results. Scripts handle data - return only what's needed.`;

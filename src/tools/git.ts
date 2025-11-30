@@ -1,5 +1,5 @@
 // Git tools for version control operations
-import { Tool, ToolResult } from './index';
+import { Tool } from './index';
 import { exec } from 'child_process';
 import { promisify } from 'util';
 

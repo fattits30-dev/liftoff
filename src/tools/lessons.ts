@@ -191,7 +191,7 @@ export class LessonsManager {
     private cleanError(error: string): string {
         // Remove file paths, line numbers, timestamps - keep the core error
         return error
-            .replace(/\/[\w\/.-]+/g, '<path>')        // Unix paths
+            .replace(/\/[\w/.-]+/g, '<path>')         // Unix paths
             .replace(/[A-Z]:\\[\w\\.-]+/gi, '<path>') // Windows paths
             .replace(/:\d+:\d+/g, '')                  // Line:col numbers
             .replace(/\d{4}-\d{2}-\d{2}/g, '')        // Dates

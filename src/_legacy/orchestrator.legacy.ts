@@ -9,6 +9,7 @@ import * as vscode from 'vscode';
 import { AutonomousAgentManager, AgentType, Agent } from './autonomousAgent';
 import { HybridRouter } from './providers/hybridRouter';
 import { HuggingFaceProvider } from './hfProvider';
+import { OrchestratorMemory } from './memory/agentMemory';
 
 export interface TaskPlan {
     summary: string;
@@ -86,6 +87,11 @@ export class Orchestrator {
     private messages: OrchestratorMessage[] = [];
     private outputChannel: vscode.OutputChannel;
     private activeAgents: Map<string, Agent> = new Map();
+    private pendingPlan: TaskPlan | null = null;
+    private deferExecution: boolean = true; // Wait for user approval before executing
+
+    // Memory system for orchestrator
+    private memory: OrchestratorMemory | null = null;
 
     private readonly _onMessage = new vscode.EventEmitter<OrchestratorMessage>();
     public readonly onMessage = this._onMessage.event;
@@ -96,8 +102,9 @@ export class Orchestrator {
     private readonly _onAgentSpawned = new vscode.EventEmitter<{ step: TaskStep; agent: Agent }>();
     public readonly onAgentSpawned = this._onAgentSpawned.event;
 
-    constructor(agentManager: AutonomousAgentManager) {
+    constructor(agentManager: AutonomousAgentManager, memory?: OrchestratorMemory) {
         this.agentManager = agentManager;
+        this.memory = memory || null;
         this.outputChannel = vscode.window.createOutputChannel('Liftoff Orchestrator');
 
         // Add system message
@@ -106,13 +113,17 @@ export class Orchestrator {
             content: ORCHESTRATOR_SYSTEM_PROMPT,
             timestamp: new Date()
         });
+
+        if (this.memory) {
+            this.outputChannel.appendLine('[Orchestrator] Memory system initialized');
+        }
     }
 
     setApiKey(apiKey: string): void {
         this.hfProvider = new HuggingFaceProvider(apiKey);
         this.hybridRouter = new HybridRouter({
             cloudApiKey: apiKey,
-            cloudModel: 'meta-llama/Llama-3.3-70B-Instruct',
+            cloudModel: 'deepseek-ai/DeepSeek-V3-0324',  // DeepSeek V3 - best for coding
             localModel: 'qwen2.5-coder:7b-instruct-q5_K_M',
         });
     }
@@ -163,7 +174,7 @@ export class Orchestrator {
 
         try {
             const response = await this.hfProvider.chat(
-                'meta-llama/Llama-3.3-70B-Instruct',
+                'deepseek-ai/DeepSeek-V3-0324',
                 this.messages.map(m => ({ role: m.role, content: m.content })),
                 { maxTokens: 1024, temperature: 0.3 }
             );
@@ -182,7 +193,7 @@ export class Orchestrator {
     }
 
     /**
-     * Plan and execute a complex task
+     * Plan and optionally execute a complex task
      */
     private async planAndExecute(userMessage: string): Promise<string> {
         if (!this.hfProvider) {
@@ -208,10 +219,72 @@ export class Orchestrator {
         });
         this._onMessage.fire(this.messages[this.messages.length - 1]);
 
-        // Step 2: Execute the plan
+        // If deferred execution, store plan and wait for approval
+        if (this.deferExecution) {
+            this.pendingPlan = plan;
+            return planAnnouncement;
+        }
+
+        // Step 2: Execute the plan immediately
+        return this.runPlanExecution(plan);
+    }
+
+    /**
+     * Execute the current pending plan (called after user approval)
+     */
+    public async executeCurrentPlan(): Promise<string> {
+        if (!this.pendingPlan) {
+            return "No plan pending execution";
+        }
+
+        const plan = this.pendingPlan;
+        this.pendingPlan = null;
+
+        return this.runPlanExecution(plan);
+    }
+
+    /**
+     * Cancel the pending plan
+     */
+    public cancelPendingPlan(): void {
+        this.pendingPlan = null;
+        this.log('Plan cancelled by user');
+    }
+
+    /**
+     * Get the pending plan (for UI display)
+     */
+    public getPendingPlan(): TaskPlan | null {
+        return this.pendingPlan;
+    }
+
+    /**
+     * Set whether to defer execution until approval
+     */
+    public setDeferExecution(defer: boolean): void {
+        this.deferExecution = defer;
+    }
+
+    /**
+     * Execute a plan and return results summary
+     */
+    private async runPlanExecution(plan: TaskPlan): Promise<string> {
         const results = await this.executePlan(plan);
 
-        // Step 3: Summarize results
+        // Determine overall result for memory
+        const successful = results.filter(r => r.status === 'completed').length;
+        const total = results.length;
+        const planResult: 'success' | 'partial' | 'failed' =
+            successful === total ? 'success' :
+            successful > 0 ? 'partial' : 'failed';
+
+        // Record to memory for future reference
+        if (this.memory) {
+            this.memory.recordPlan(plan.summary, plan, planResult);
+            this.log(`Plan recorded to memory: ${planResult}`);
+        }
+
+        // Summarize results
         const summary = this.summarizeResults(plan, results);
         this.messages.push({
             role: 'assistant',
@@ -236,7 +309,7 @@ Analyze this request and create an execution plan. Respond ONLY with the JSON pl
 
         try {
             const response = await this.hfProvider.chat(
-                'meta-llama/Llama-3.3-70B-Instruct',
+                'deepseek-ai/DeepSeek-V3-0324',
                 [
                     { role: 'system', content: ORCHESTRATOR_SYSTEM_PROMPT },
                     { role: 'user', content: planPrompt }
@@ -369,17 +442,39 @@ Analyze this request and create an execution plan. Respond ONLY with the JSON pl
     }
 
     /**
-     * Wait for an agent to complete
+     * Wait for an agent to complete using event-driven pattern
+     * No more polling - listens to the onAgentComplete event
      */
     private waitForAgent(agentId: string): Promise<Agent> {
         return new Promise((resolve) => {
-            const checkInterval = setInterval(() => {
-                const agent = this.agentManager.getAgent(agentId);
-                if (!agent || ['completed', 'error', 'stopped'].includes(agent.status)) {
-                    clearInterval(checkInterval);
-                    resolve(agent || { status: 'error' } as Agent);
+            // Check if already completed
+            const agent = this.agentManager.getAgent(agentId);
+            if (!agent || ['completed', 'error', 'stopped'].includes(agent.status)) {
+                resolve(agent || { status: 'error' } as Agent);
+                return;
+            }
+
+            // Subscribe to completion event
+            const disposable = this.agentManager.onAgentComplete((event) => {
+                if (event.agentId === agentId) {
+                    disposable.dispose();
+                    resolve(event.agent);
                 }
-            }, 1000);
+            });
+
+            // Fallback timeout (5 minutes max per agent)
+            const timeout = setTimeout(() => {
+                disposable.dispose();
+                const currentAgent = this.agentManager.getAgent(agentId);
+                resolve(currentAgent || { status: 'error' } as Agent);
+            }, 5 * 60 * 1000);
+
+            // Clean up timeout if event fires first
+            const originalDispose = disposable.dispose.bind(disposable);
+            disposable.dispose = () => {
+                clearTimeout(timeout);
+                originalDispose();
+            };
         });
     }
 

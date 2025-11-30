@@ -1,4 +1,4 @@
-import * as vscode from 'vscode';
+import { CLOUD_MODELS, DEFAULT_CLOUD_MODEL_NAME, API_ENDPOINTS } from './config';
 
 export interface HFMessage {
     role: 'system' | 'user' | 'assistant';
@@ -12,28 +12,30 @@ export interface HFConfig {
     temperature: number;
 }
 
-// Available coding models via HF Inference Providers
-export const CODING_MODELS = {
-    'qwen3-coder': 'Qwen/Qwen3-Coder-30B-A3B-Instruct',  // Latest, recommended
-    'qwen-32b': 'Qwen/Qwen2.5-Coder-32B-Instruct',
-    'qwen-14b': 'Qwen/Qwen2.5-Coder-14B-Instruct',
-    'qwen-7b': 'Qwen/Qwen2.5-Coder-7B-Instruct',
-    'deepseek-v3': 'deepseek-ai/DeepSeek-V3-0324',
-    'deepseek-r1': 'deepseek-ai/DeepSeek-R1',
-    'llama-70b': 'meta-llama/Llama-3.3-70B-Instruct'
-} as const;
-
-export const DEFAULT_MODEL = 'Qwen/Qwen3-Coder-30B-A3B-Instruct';
+// Re-export from config for backward compatibility
+export const CODING_MODELS = CLOUD_MODELS;
+export const DEFAULT_MODEL = DEFAULT_CLOUD_MODEL_NAME;
 
 export type ModelKey = keyof typeof CODING_MODELS;
 
 export class HuggingFaceProvider {
     private apiKey: string;
     // New router endpoint (OpenAI-compatible)
-    private baseUrl = 'https://router.huggingface.co/v1';
+    private baseUrl = API_ENDPOINTS.huggingface;
     
     constructor(apiKey: string) {
-        this.apiKey = apiKey;
+        // API KEY VALIDATION: Prevent crashes from empty/invalid keys
+        if (!apiKey || typeof apiKey !== 'string') {
+            throw new Error('HuggingFace API key is required');
+        }
+        const trimmedKey = apiKey.trim();
+        if (trimmedKey.length === 0) {
+            throw new Error('HuggingFace API key cannot be empty');
+        }
+        if (!trimmedKey.startsWith('hf_')) {
+            console.warn('[HuggingFaceProvider] API key does not start with hf_ - may be invalid');
+        }
+        this.apiKey = trimmedKey;
     }
 
     async *streamChat(
@@ -93,7 +95,7 @@ export class HuggingFaceProvider {
                             if (content) {
                                 yield content;
                             }
-                        } catch (e) {
+                        } catch (_e) {
                             // Skip malformed JSON
                         }
                     }
@@ -133,7 +135,7 @@ export class HuggingFaceProvider {
             });
             
             return response.ok;
-        } catch (e) {
+        } catch (_e) {
             return false;
         }
     }

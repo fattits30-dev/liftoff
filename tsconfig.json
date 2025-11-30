@@ -13,5 +13,5 @@
     "declaration": true,
     "jsx": "react"
   },
-  "exclude": ["node_modules", "dist", "src/webview"]
+  "exclude": ["node_modules", "dist", "src/webview", "src/_legacy", "src/appBuilder/templates"]
 }

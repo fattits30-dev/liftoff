@@ -5,14 +5,20 @@
  * - Anthropic Claude Code Best Practices
  * - OpenSSF Security-Focused Guide for AI Code Assistants
  * - VeriGuard Framework principles
+ * 
+ * All I/O operations are async to prevent blocking the extension host.
  *
  * @see https://www.anthropic.com/engineering/claude-code-best-practices
  * @see https://best.openssf.org/Security-Focused-Guide-for-AI-Code-Assistant-Instructions
  */
 
-import * as fs from 'fs';
+import * as fs from 'fs/promises';
 import * as path from 'path';
-import { execSync, spawnSync } from 'child_process';
+import { exec } from 'child_process';
+import { promisify } from 'util';
+import * as os from 'os';
+
+const execAsync = promisify(exec);
 
 export interface ValidationResult {
     valid: boolean;
@@ -45,7 +51,6 @@ export interface Checkpoint {
  * Core safety rules that agents MUST follow
  */
 export const SAFETY_RULES = {
-    // Files that should NEVER be modified without explicit user confirmation
     PROTECTED_PATTERNS: [
         /\.env$/,
         /\.env\..*/,
@@ -64,7 +69,6 @@ export const SAFETY_RULES = {
         /go\.sum$/,
     ],
 
-    // Directories that should never be modified
     FORBIDDEN_DIRS: [
         'node_modules',
         '.git',
@@ -77,20 +81,15 @@ export const SAFETY_RULES = {
         '.nuxt',
     ],
 
-    // Maximum file size to modify (prevent accidental large file corruption)
     MAX_FILE_SIZE: 1024 * 1024, // 1MB
-
-    // Maximum number of files to modify in a single operation
     MAX_FILES_PER_BATCH: 10,
 
-    // Maximum number of destructive operations per minute
     RATE_LIMIT: {
         writes: 20,
         deletes: 5,
         windowMs: 60000,
     },
 
-    // Require explicit confirmation for these operations
     REQUIRES_CONFIRMATION: [
         'delete_file',
         'delete_directory',
@@ -102,9 +101,21 @@ export const SAFETY_RULES = {
     ],
 };
 
+// Helper to check file existence (async)
+async function fileExists(filePath: string): Promise<boolean> {
+    try {
+        await fs.access(filePath);
+        return true;
+    } catch {
+        return false;
+    }
+}
+
+
 /**
  * Safety Guardrails Manager
  * Implements VeriGuard-inspired dual-stage validation
+ * All I/O is async to prevent blocking
  */
 export class SafetyGuardrails {
     private workspaceRoot: string;
@@ -119,9 +130,9 @@ export class SafetyGuardrails {
     // ===== STAGE 1: PRE-EXECUTION VALIDATION =====
 
     /**
-     * Check if a file operation is safe to perform
+     * Check if a file operation is safe to perform (async)
      */
-    checkFileOperation(filePath: string, operation: 'read' | 'write' | 'delete'): SafetyCheckResult {
+    async checkFileOperation(filePath: string, operation: 'read' | 'write' | 'delete'): Promise<SafetyCheckResult> {
         const absolutePath = path.isAbsolute(filePath)
             ? filePath
             : path.join(this.workspaceRoot, filePath);
@@ -158,14 +169,18 @@ export class SafetyGuardrails {
             }
         }
 
-        // Check file size for writes
-        if (operation === 'write' && fs.existsSync(absolutePath)) {
-            const stats = fs.statSync(absolutePath);
-            if (stats.size > SAFETY_RULES.MAX_FILE_SIZE) {
-                return {
-                    allowed: false,
-                    reason: `File too large to modify safely: ${stats.size} bytes`
-                };
+        // Check file size for writes (async)
+        if (operation === 'write' && await fileExists(absolutePath)) {
+            try {
+                const stats = await fs.stat(absolutePath);
+                if (stats.size > SAFETY_RULES.MAX_FILE_SIZE) {
+                    return {
+                        allowed: false,
+                        reason: `File too large to modify safely: ${stats.size} bytes`
+                    };
+                }
+            } catch {
+                // File doesn't exist or can't be accessed, allow the write
             }
         }
 
@@ -181,13 +196,12 @@ export class SafetyGuardrails {
     }
 
     /**
-     * Rate limit destructive operations
+     * Rate limit destructive operations (sync - just in-memory)
      */
     private checkRateLimit(operation: 'write' | 'delete'): SafetyCheckResult {
         const now = Date.now();
         const windowStart = now - SAFETY_RULES.RATE_LIMIT.windowMs;
 
-        // Clean old entries
         this.operationLog = this.operationLog.filter(op => op.timestamp > windowStart);
 
         const recentOps = this.operationLog.filter(op => op.type === operation).length;
@@ -206,33 +220,86 @@ export class SafetyGuardrails {
         return { allowed: true };
     }
 
+
     /**
-     * Validate command safety
+     * Validate command safety (sync - just regex, no I/O)
      */
     checkCommand(command: string): SafetyCheckResult {
+        const normalizedCmd = command.replace(/\s+/g, ' ').trim();
+        
+        // Command injection patterns
+        const injectionPatterns = [
+            /;\s*(sudo\s+)?rm\s/i,
+            /&&\s*(sudo\s+)?rm\s/i,
+            /\|\|\s*(sudo\s+)?rm\s/i,
+            /`.*rm\s/i,
+            /\$\(.*rm\s/i,
+            /;\s*(sudo\s+)?del\s/i,
+            /&&\s*(sudo\s+)?del\s/i,
+            /;\s*(sudo\s+)?rd\s/i,
+            /&&\s*(sudo\s+)?rd\s/i,
+            /;\s*(sudo\s+)?format\s/i,
+            /;\s*(sudo\s+)?dd\s/i,
+            /;\s*(sudo\s+)?mkfs/i,
+            /;\s*curl\s.*\|\s*(sudo\s+)?sh/i,
+            /;\s*wget\s.*\|\s*(sudo\s+)?sh/i,
+            /&&\s*curl\s.*\|\s*(sudo\s+)?sh/i,
+            /&&\s*wget\s.*\|\s*(sudo\s+)?sh/i,
+            /\|\s*(sudo\s+)?bash$/i,
+            /\|\s*(sudo\s+)?sh$/i,
+            /\|\s*python[23]?\s+-c/i,
+            /\|\s*node\s+-e/i,
+            /\beval\s+/i,
+            /\bexec\s+/i,
+            /\$\{.*\}/,
+        ];
+
+        for (const pattern of injectionPatterns) {
+            if (pattern.test(normalizedCmd)) {
+                return {
+                    allowed: false,
+                    reason: `Command injection attempt detected: ${normalizedCmd.substring(0, 50)}...`,
+                    requiresConfirmation: false
+                };
+            }
+        }
+
+        // Dangerous commands
         const dangerous = [
-            /rm\s+-rf\s+[\/~]/,
-            /rm\s+-rf\s+\*/,
+            /(sudo\s+)?rm\s+-rf\s+[/~]/i,
+            /(sudo\s+)?rm\s+-rf\s+\*/i,
+            /(sudo\s+)?rm\s+-rf\s+\.\./i,
+            /(sudo\s+)?rm\s+-rf\s+\.$/i,
             /:\s*>\s*\//,
-            /dd\s+if=/,
-            /mkfs\./,
-            /format\s+/i,
+            /(sudo\s+)?dd\s+if=/i,
+            /(sudo\s+)?mkfs\./i,
+            /format\s+[a-z]:/i,
             /del\s+\/[sq]/i,
             /rd\s+\/s/i,
-            /> \/dev\//,
-            /chmod\s+-R\s+777/,
-            /git\s+push\s+.*--force/,
-            /git\s+reset\s+--hard/,
+            />\s*\/dev\//,
+            /(sudo\s+)?chmod\s+-R\s+777/i,
+            /git\s+push\s+.*--force/i,
+            /git\s+reset\s+--hard/i,
             /DROP\s+DATABASE/i,
             /DROP\s+TABLE/i,
             /TRUNCATE/i,
+            /(sudo\s+)?shutdown/i,
+            /(sudo\s+)?reboot/i,
+            /(sudo\s+)?init\s+0/i,
+            /(sudo\s+)?systemctl\s+(stop|disable)\s+/i,
+            /(sudo\s+)?kill\s+-9\s+1$/i,
+            />\s*\/etc\//i,
+            /(sudo\s+)?chown\s+-R\s+/i,
+            /(sudo\s+)?passwd/i,
+            /(sudo\s+)?userdel/i,
+            /base64\s+-d.*\|\s*sh/i,
         ];
 
         for (const pattern of dangerous) {
-            if (pattern.test(command)) {
+            if (pattern.test(normalizedCmd)) {
                 return {
                     allowed: false,
-                    reason: `Dangerous command blocked: ${command.substring(0, 50)}...`,
+                    reason: `Dangerous command blocked: ${normalizedCmd.substring(0, 50)}...`,
                     requiresConfirmation: true
                 };
             }
@@ -241,12 +308,13 @@ export class SafetyGuardrails {
         return { allowed: true };
     }
 
-    // ===== STAGE 2: SYNTAX VALIDATION =====
+
+    // ===== STAGE 2: SYNTAX VALIDATION (async) =====
 
     /**
-     * Validate syntax of code before writing
+     * Validate syntax of code before writing (async)
      */
-    validateSyntax(filePath: string, content: string): ValidationResult {
+    async validateSyntax(filePath: string, content: string): Promise<ValidationResult> {
         const ext = path.extname(filePath).toLowerCase();
         const errors: string[] = [];
         const warnings: string[] = [];
@@ -258,8 +326,7 @@ export class SafetyGuardrails {
                     break;
 
                 case '.py':
-                    // Use Python's compile to check syntax
-                    const pyResult = this.checkPythonSyntax(content);
+                    const pyResult = await this.checkPythonSyntax(content);
                     if (!pyResult.valid) {
                         errors.push(...pyResult.errors);
                     }
@@ -267,8 +334,7 @@ export class SafetyGuardrails {
 
                 case '.ts':
                 case '.tsx':
-                    // TypeScript syntax check via tsc
-                    const tsResult = this.checkTypeScriptSyntax(filePath, content);
+                    const tsResult = await this.checkTypeScriptSyntax(content);
                     if (!tsResult.valid) {
                         errors.push(...tsResult.errors);
                     }
@@ -277,7 +343,6 @@ export class SafetyGuardrails {
                 case '.js':
                 case '.jsx':
                 case '.mjs':
-                    // JavaScript syntax check via Node
                     const jsResult = this.checkJavaScriptSyntax(content);
                     if (!jsResult.valid) {
                         errors.push(...jsResult.errors);
@@ -286,7 +351,6 @@ export class SafetyGuardrails {
 
                 case '.yaml':
                 case '.yml':
-                    // Basic YAML validation
                     const yamlResult = this.checkYamlSyntax(content);
                     if (!yamlResult.valid) {
                         errors.push(...yamlResult.errors);
@@ -297,56 +361,44 @@ export class SafetyGuardrails {
             errors.push(`Syntax validation failed: ${e.message}`);
         }
 
-        return {
-            valid: errors.length === 0,
-            errors,
-            warnings
-        };
+        return { valid: errors.length === 0, errors, warnings };
     }
 
-    private checkPythonSyntax(content: string): ValidationResult {
+    private async checkPythonSyntax(content: string): Promise<ValidationResult> {
         const errors: string[] = [];
+        const tempFile = path.join(os.tmpdir(), `.liftoff_syntax_${Date.now()}.py`);
+        
         try {
-            // Write to temp file and check with Python
-            const tempFile = path.join(this.workspaceRoot, '.liftoff_temp_syntax_check.py');
-            fs.writeFileSync(tempFile, content);
+            await fs.writeFile(tempFile, content);
             try {
-                execSync(`python -m py_compile "${tempFile}"`, {
-                    encoding: 'utf-8',
-                    stdio: ['pipe', 'pipe', 'pipe']
-                });
+                await execAsync(`python -m py_compile "${tempFile}"`);
             } catch (e: any) {
                 errors.push(e.stderr || e.message);
             } finally {
-                fs.unlinkSync(tempFile);
+                await fs.unlink(tempFile).catch(() => {});
             }
         } catch (e: any) {
-            // If Python check fails entirely, return a warning instead
             return { valid: true, errors: [], warnings: [`Could not validate Python syntax: ${e.message}`] };
         }
         return { valid: errors.length === 0, errors, warnings: [] };
     }
 
-    private checkTypeScriptSyntax(filePath: string, content: string): ValidationResult {
+    private async checkTypeScriptSyntax(content: string): Promise<ValidationResult> {
         const errors: string[] = [];
+        const tempFile = path.join(os.tmpdir(), `.liftoff_syntax_${Date.now()}.ts`);
+        
         try {
-            const tempFile = path.join(this.workspaceRoot, '.liftoff_temp_syntax_check.ts');
-            fs.writeFileSync(tempFile, content);
+            await fs.writeFile(tempFile, content);
             try {
-                execSync(`npx tsc --noEmit --skipLibCheck "${tempFile}"`, {
-                    encoding: 'utf-8',
-                    cwd: this.workspaceRoot,
-                    stdio: ['pipe', 'pipe', 'pipe']
-                });
+                await execAsync(`npx tsc --noEmit --skipLibCheck "${tempFile}"`, { cwd: this.workspaceRoot });
             } catch (e: any) {
                 const output = e.stdout || e.stderr || e.message;
-                // Only include actual errors, not path noise
                 const lines = output.split('\n').filter((l: string) => l.includes('error TS'));
                 if (lines.length > 0) {
-                    errors.push(...lines.slice(0, 5)); // First 5 errors
+                    errors.push(...lines.slice(0, 5));
                 }
             } finally {
-                if (fs.existsSync(tempFile)) fs.unlinkSync(tempFile);
+                await fs.unlink(tempFile).catch(() => {});
             }
         } catch (e: any) {
             return { valid: true, errors: [], warnings: [`Could not validate TypeScript syntax: ${e.message}`] };
@@ -357,7 +409,6 @@ export class SafetyGuardrails {
     private checkJavaScriptSyntax(content: string): ValidationResult {
         const errors: string[] = [];
         try {
-            // Use Node's vm to check syntax
             new Function(content);
         } catch (e: any) {
             errors.push(e.message);
@@ -367,18 +418,11 @@ export class SafetyGuardrails {
 
     private checkYamlSyntax(content: string): ValidationResult {
         const errors: string[] = [];
-        // Basic YAML structure check
         const lines = content.split('\n');
-        let indentStack: number[] = [0];
 
         for (let i = 0; i < lines.length; i++) {
             const line = lines[i];
             if (line.trim() === '' || line.trim().startsWith('#')) continue;
-
-            const indent = line.search(/\S/);
-            if (indent === -1) continue;
-
-            // Check for tabs (YAML shouldn't have tabs)
             if (line.includes('\t')) {
                 errors.push(`Line ${i + 1}: Tabs not allowed in YAML`);
             }
@@ -387,32 +431,25 @@ export class SafetyGuardrails {
         return { valid: errors.length === 0, errors, warnings: [] };
     }
 
-    // ===== CHECKPOINTS & ROLLBACK =====
+
+    // ===== CHECKPOINTS & ROLLBACK (async) =====
 
     /**
-     * Create a checkpoint before making changes
+     * Create a checkpoint before making changes (async)
      */
-    createCheckpoint(description: string): string {
+    async createCheckpoint(description: string): Promise<string> {
         const id = `checkpoint-${Date.now()}-${Math.random().toString(36).substring(2, 8)}`;
 
-        // Try to create a git stash as backup
         let gitRef: string | undefined;
         try {
-            const status = execSync('git status --porcelain', {
-                cwd: this.workspaceRoot,
-                encoding: 'utf-8'
-            });
+            const { stdout: status } = await execAsync('git status --porcelain', { cwd: this.workspaceRoot });
             if (status.trim()) {
-                execSync(`git stash push -m "liftoff-checkpoint-${id}"`, {
-                    cwd: this.workspaceRoot,
-                    encoding: 'utf-8'
-                });
+                await execAsync(`git stash push -m "liftoff-checkpoint-${id}"`, { cwd: this.workspaceRoot });
                 gitRef = id;
-                // Immediately pop to keep working
-                execSync('git stash pop', { cwd: this.workspaceRoot });
+                await execAsync('git stash pop', { cwd: this.workspaceRoot });
             }
-        } catch (e) {
-            // Git not available or not a repo, continue without
+        } catch {
+            // Git not available or not a repo
         }
 
         const checkpoint: Checkpoint = {
@@ -428,45 +465,45 @@ export class SafetyGuardrails {
     }
 
     /**
-     * Backup file content before modification
+     * Backup file content before modification (async)
      */
-    backupFile(filePath: string): void {
+    async backupFile(filePath: string): Promise<void> {
         const absolutePath = path.isAbsolute(filePath)
             ? filePath
             : path.join(this.workspaceRoot, filePath);
 
-        if (fs.existsSync(absolutePath)) {
-            this.fileBackups.set(absolutePath, fs.readFileSync(absolutePath, 'utf-8'));
+        if (await fileExists(absolutePath)) {
+            const content = await fs.readFile(absolutePath, 'utf-8');
+            this.fileBackups.set(absolutePath, content);
         }
     }
 
     /**
-     * Restore file from backup
+     * Restore file from backup (async)
      */
-    restoreFile(filePath: string): boolean {
+    async restoreFile(filePath: string): Promise<boolean> {
         const absolutePath = path.isAbsolute(filePath)
             ? filePath
             : path.join(this.workspaceRoot, filePath);
 
         const backup = this.fileBackups.get(absolutePath);
         if (backup !== undefined) {
-            fs.writeFileSync(absolutePath, backup, 'utf-8');
+            await fs.writeFile(absolutePath, backup, 'utf-8');
             return true;
         }
         return false;
     }
 
     /**
-     * Rollback all changes since checkpoint
+     * Rollback all changes since checkpoint (async)
      */
-    rollback(checkpointId: string): boolean {
+    async rollback(checkpointId: string): Promise<boolean> {
         const checkpoint = this.checkpoints.get(checkpointId);
         if (!checkpoint) return false;
 
-        // Restore files
         for (const change of checkpoint.changes) {
             const absolutePath = path.join(this.workspaceRoot, change.path);
-            fs.writeFileSync(absolutePath, change.originalContent, 'utf-8');
+            await fs.writeFile(absolutePath, change.originalContent, 'utf-8');
         }
 
         return true;
@@ -487,11 +524,9 @@ export class SafetyGuardrails {
         }
     }
 
+
     // ===== RCI (RECURSIVE CRITICISM & IMPROVEMENT) =====
 
-    /**
-     * Generate self-critique prompt for code changes
-     */
     generateRCIPrompt(originalCode: string, modifiedCode: string, filePath: string): string {
         return `Review this code modification for problems:
 
@@ -517,13 +552,9 @@ Check for:
 List any problems found, or respond with "NO_ISSUES" if the change looks correct.`;
     }
 
-    /**
-     * Analyze code diff for potential issues
-     */
     analyzeDiff(original: string, modified: string): string[] {
         const issues: string[] = [];
 
-        // Check for removed functionality
         const originalFunctions: string[] = original.match(/(?:function|def|const|let|var)\s+(\w+)/g) || [];
         const modifiedFunctions: string[] = modified.match(/(?:function|def|const|let|var)\s+(\w+)/g) || [];
 
@@ -533,7 +564,6 @@ List any problems found, or respond with "NO_ISSUES" if the change looks correct
             }
         }
 
-        // Check for hardcoded secrets
         const secretPatterns = [
             /api[_-]?key\s*[=:]\s*['"][^'"]+['"]/i,
             /password\s*[=:]\s*['"][^'"]+['"]/i,
@@ -546,7 +576,6 @@ List any problems found, or respond with "NO_ISSUES" if the change looks correct
             }
         }
 
-        // Check for TODO/FIXME
         if ((modified.match(/TODO|FIXME|XXX/gi) || []).length > (original.match(/TODO|FIXME|XXX/gi) || []).length) {
             issues.push('Warning: New TODO/FIXME comments added - ensure these are addressed');
         }
@@ -556,10 +585,7 @@ List any problems found, or respond with "NO_ISSUES" if the change looks correct
 
     // ===== BATCH OPERATION SAFETY =====
 
-    /**
-     * Check if a batch of file operations is safe
-     */
-    checkBatchOperation(files: string[], operation: 'write' | 'delete'): SafetyCheckResult {
+    async checkBatchOperation(files: string[], operation: 'write' | 'delete'): Promise<SafetyCheckResult> {
         if (files.length > SAFETY_RULES.MAX_FILES_PER_BATCH) {
             return {
                 allowed: false,
@@ -569,7 +595,7 @@ List any problems found, or respond with "NO_ISSUES" if the change looks correct
 
         const issues: string[] = [];
         for (const file of files) {
-            const check = this.checkFileOperation(file, operation);
+            const check = await this.checkFileOperation(file, operation);
             if (!check.allowed) {
                 issues.push(`${file}: ${check.reason}`);
             }
@@ -585,14 +611,7 @@ List any problems found, or respond with "NO_ISSUES" if the change looks correct
         return { allowed: true };
     }
 
-    /**
-     * Get safety status summary
-     */
-    getStatus(): {
-        checkpointCount: number;
-        backupCount: number;
-        recentOperations: number;
-    } {
+    getStatus(): { checkpointCount: number; backupCount: number; recentOperations: number } {
         const now = Date.now();
         const windowStart = now - SAFETY_RULES.RATE_LIMIT.windowMs;
 

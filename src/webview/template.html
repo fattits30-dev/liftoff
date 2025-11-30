@@ -1,0 +1,149 @@
+<header class="header">
+    <div class="header-brand">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M12 2L2 7l10 5 10-5-10-5z"/>
+            <path d="M2 17l10 5 10-5"/>
+            <path d="M2 12l10 5 10-5"/>
+        </svg>
+        <span>Liftoff</span>
+    </div>
+    
+    <div class="header-status">
+        <span class="status-indicator" id="statusIndicator"></span>
+        <span id="statusText">Ready</span>
+    </div>
+
+    <div class="header-actions">
+        <button class="btn-icon" onclick="clearChat()" title="New Chat">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M12 5v14M5 12h14"/>
+            </svg>
+        </button>
+        <button class="btn btn-danger" id="stopBtn" style="display:none;" onclick="stopAll()">Stop</button>
+    </div>
+</header>
+
+<div class="progress-bar" id="progressBar">
+    <div class="progress-fill" id="progressFill"></div>
+</div>
+
+<main class="main">
+    <!-- Chat Panel -->
+    <section class="chat-panel">
+        <div class="panel-header">
+            <div class="panel-title">Orchestrator Chat</div>
+            <div class="panel-subtitle">Plan → delegate → summarize</div>
+        </div>
+        <div class="chat-messages" id="chatMessages">
+            <div class="empty-state" id="emptyState">
+                <div class="empty-state-icon">🚀</div>
+                <div class="empty-state-title">What would you like to build?</div>
+            </div>
+        </div>
+
+        <div class="chat-input-container">
+            <div class="chat-input-wrapper">
+                <input type="text" class="chat-input" id="chatInput" placeholder="Describe what you want to do..." autocomplete="off" />
+                <button class="send-btn" onclick="sendMessage()">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M22 2L11 13"/><path d="M22 2l-7 20-4-9-9-4 20-7z"/>
+                    </svg>
+                </button>
+            </div>
+        </div>
+    </section>
+
+    <!-- Status Rail -->
+    <div class="status-rail">
+        <div class="rail-section">
+            <div class="rail-label">State</div>
+            <div class="rail-chip state idle" id="railState">Ready</div>
+        </div>
+        <div class="rail-section">
+            <div class="rail-label">Active</div>
+            <div class="rail-chip" id="railActiveAgent">Orchestrator</div>
+        </div>
+        <div class="rail-stats">
+            <div class="rail-stat">
+                <span class="rail-stat-label">Tools</span>
+                <span class="rail-stat-value" id="railTools">0</span>
+            </div>
+            <div class="rail-stat">
+                <span class="rail-stat-label">Work</span>
+                <span class="rail-stat-value" id="railFiles">0</span>
+            </div>
+            <div class="rail-stat">
+                <span class="rail-stat-label">Output</span>
+                <span class="rail-stat-value" id="railTerminal">0</span>
+            </div>
+        </div>
+    </div>
+
+    <!-- Activity Panel -->
+    <aside class="activity-panel">
+        <div class="activity-header">
+            <span>🛠️</span>
+            <div class="activity-heading">
+                <span class="activity-title">Agents & Tools</span>
+                <span class="activity-subtitle">Live output and artifacts</span>
+            </div>
+            <div class="activity-tabs">
+                <button class="activity-tab active" data-tab="tools" onclick="switchTab('tools')" id="tabTools">Tools</button>
+                <button class="activity-tab" data-tab="files" onclick="switchTab('files')" id="tabFiles">Agent Work</button>
+                <button class="activity-tab" data-tab="terminal" onclick="switchTab('terminal')" id="tabTerminal">Output</button>
+            </div>
+        </div>
+
+        <!-- Editor Stats Bar -->
+        <div class="editor-stats" id="editorStats">
+            <div class="stat-item">
+                <span class="stat-label">Files:</span>
+                <span class="stat-value files" id="statFiles">0</span>
+            </div>
+            <div class="stat-item">
+                <span class="stat-label">Added:</span>
+                <span class="stat-value added" id="statAdded">+0</span>
+            </div>
+            <div class="stat-item">
+                <span class="stat-label">Removed:</span>
+                <span class="stat-value removed" id="statRemoved">-0</span>
+            </div>
+            <div class="stat-item">
+                <span class="stat-label">Tools:</span>
+                <span class="stat-value" id="statTools">0</span>
+            </div>
+            <div class="stat-item">
+                <span class="stat-label">Success:</span>
+                <span class="stat-value" id="statSuccess">-</span>
+            </div>
+        </div>
+
+        <div class="activity-content">
+            <!-- Main Activity Area -->
+            <div class="activity-main" id="activityMain">
+                <div class="empty-state" id="activityEmpty">
+                    <div class="empty-state-icon">🔧</div>
+                    <div class="empty-state-title">No Activity Yet</div>
+                </div>
+                
+                <div id="toolsList" style="display:none;"></div>
+                <div id="filesList" style="display:none;"></div>
+                <div id="terminalView" style="display:none;"></div>
+            </div>
+
+            <!-- Playwright Panel -->
+            <div class="playwright-panel hidden" id="playwrightPanel">
+                <div class="playwright-header">
+                    <span>🌐</span>
+                    <span class="playwright-title">Browser</span>
+                    <button class="playwright-close" onclick="togglePlaywright(false)">✕</button>
+                </div>
+                <div class="playwright-content" id="playwrightContent">
+                    <div class="playwright-url" id="playwrightUrl">No page loaded</div>
+                    <div id="playwrightScreenshot"></div>
+                    <div id="playwrightActions"></div>
+                </div>
+            </div>
+        </div>
+    </aside>
+</main>
