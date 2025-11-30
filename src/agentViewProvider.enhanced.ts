@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { Agent, AgentStatus } from './autonomousAgent';
+import { Agent } from './autonomousAgent';
 
 /**
  * Enhanced Agent View Provider with:
