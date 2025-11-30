@@ -61,18 +61,27 @@ export class McpClient extends EventEmitter {
         return new Promise((resolve, reject) => {
             try {
                 // Spawn the MCP server process
-                // On Windows, use cmd /c for npx commands to handle paths with spaces
                 const isWindows = process.platform === 'win32';
                 const command = this.config.command;
                 const args = this.config.args || [];
-                
-                // Always use shell: true to ensure PATH is searched for executables
-                // Node.js handles argument escaping properly in shell mode
+
+                // SECURITY: Allowlist of permitted MCP server commands
+                const ALLOWED_COMMANDS = ['npx', 'node', 'python', 'python3', 'uvx'];
+
+                if (!ALLOWED_COMMANDS.includes(command)) {
+                    throw new Error(
+                        `Forbidden MCP command: ${command}. ` +
+                        `Allowed commands: ${ALLOWED_COMMANDS.join(', ')}`
+                    );
+                }
+
+                // SECURITY FIX: Use shell: false to prevent command injection
+                // The allowlist above ensures only safe executables are spawned
                 this.process = spawn(command, args, {
                     cwd: this.config.cwd,
                     env: { ...process.env, ...this.config.env },
                     stdio: ['pipe', 'pipe', 'pipe'],
-                    shell: true,
+                    shell: false,
                     windowsHide: isWindows
                 });
 

@@ -2,20 +2,9 @@ import * as vscode from 'vscode';
 import { Agent } from './autonomousAgent';
 
 /**
- * Enhanced Agent View Provider with:
- * - Syntax highlighting for code
- * - Output filters (All/Thoughts/Tools/Errors)
- * - Collapsible tool execution sections
- * - Copy buttons for code/output
+ * Agent View Provider - Dedicated full-screen panel for each agent
+ * Shows real-time output, tool executions, and progress
  */
-
-interface OutputMessage {
-    timestamp: string;
-    content: string;
-    type: 'thought' | 'tool' | 'result' | 'error';
-    outputType?: string;
-}
-
 export class AgentViewProvider {
     private panel: vscode.WebviewPanel | undefined;
     private disposables: vscode.Disposable[] = [];
@@ -68,9 +57,6 @@ export class AgentViewProvider {
                         this.outputBuffer = [];
                         this.sendUpdate();
                         break;
-                    case 'copy':
-                        vscode.env.clipboard.writeText(message.text);
-                        break;
                 }
             },
             null,
@@ -84,8 +70,7 @@ export class AgentViewProvider {
         this.outputBuffer.push({
             timestamp: new Date().toISOString(),
             content,
-            type,
-            outputType: type
+            type
         });
 
         // Keep last 500 messages
@@ -93,18 +78,33 @@ export class AgentViewProvider {
             this.outputBuffer = this.outputBuffer.slice(-500);
         }
 
-        this.sendUpdate();
+        if (this.panel) {
+            this.panel.webview.postMessage({
+                type: 'output',
+                message: {
+                    timestamp: new Date().toISOString(),
+                    content,
+                    outputType: type
+                }
+            });
+        }
     }
 
-    public appendToolExecution(tool: string, params: any, result?: any, error?: any): void {
-        this.outputBuffer.push({
+    public appendToolExecution(tool: string, params: any, result?: any, error?: string): void {
+        const message: ToolExecutionMessage = {
             timestamp: new Date().toISOString(),
-            content: JSON.stringify({ tool, params, result, error }),
-            type: 'tool',
-            outputType: 'tool'
-        });
+            tool,
+            params,
+            result,
+            error
+        };
 
-        this.sendUpdate();
+        if (this.panel) {
+            this.panel.webview.postMessage({
+                type: 'tool',
+                message
+            });
+        }
     }
 
     public updateAgent(agent: Agent): void {
@@ -206,124 +206,167 @@ export class AgentViewProvider {
             flex-shrink: 0;
         }
 
+        .agent-icon {
+            font-size: 32px;
+            width: 48px;
+            height: 48px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: var(--bg-tertiary);
+            border-radius: var(--radius);
+        }
+
         .agent-info {
             flex: 1;
+            min-width: 0;
         }
 
         .agent-name {
             font-size: 18px;
             font-weight: 600;
+            display: flex;
+            align-items: center;
+            gap: 10px;
             margin-bottom: 4px;
         }
 
-        .agent-task {
-            color: var(--text-secondary);
-            font-size: 12px;
-        }
-
         .status-badge {
-            padding: 4px 12px;
+            padding: 4px 10px;
             border-radius: 12px;
             font-size: 11px;
             font-weight: 600;
             text-transform: uppercase;
+            letter-spacing: 0.5px;
         }
 
-        .status-badge.running { background: var(--success); color: #000; }
-        .status-badge.waiting { background: var(--warning); color: #000; }
-        .status-badge.error { background: var(--error); color: #fff; }
-        .status-badge.completed { background: var(--info); color: #000; }
+        .status-badge.running {
+            background: rgba(63, 185, 80, 0.15);
+            color: var(--success);
+        }
 
-        /* Toolbar */
-        .toolbar {
-            background: var(--bg-secondary);
-            border-bottom: 1px solid var(--border);
-            padding: 12px 20px;
+        .status-badge.completed {
+            background: rgba(88, 166, 255, 0.15);
+            color: var(--info);
+        }
+
+        .status-badge.error {
+            background: rgba(248, 81, 73, 0.15);
+            color: var(--error);
+        }
+
+        .status-badge.idle {
+            background: rgba(139, 148, 158, 0.15);
+            color: var(--text-secondary);
+        }
+
+        .agent-task {
+            color: var(--text-secondary);
+            font-size: 13px;
+        }
+
+        .header-actions {
             display: flex;
             gap: 8px;
-            align-items: center;
-            flex-shrink: 0;
-        }
-
-        .filter-group {
-            display: flex;
-            gap: 4px;
-            background: var(--bg-tertiary);
-            border-radius: var(--radius);
-            padding: 4px;
-        }
-
-        .filter-btn {
-            padding: 6px 12px;
-            background: transparent;
-            border: none;
-            color: var(--text-secondary);
-            cursor: pointer;
-            border-radius: calc(var(--radius) - 2px);
-            font-size: 12px;
-            font-weight: 500;
-            transition: all 0.2s;
-        }
-
-        .filter-btn:hover {
-            background: var(--bg-hover);
-            color: var(--text-primary);
-        }
-
-        .filter-btn.active {
-            background: var(--accent);
-            color: #000;
         }
 
         .btn {
-            padding: 6px 12px;
-            background: var(--bg-tertiary);
-            border: 1px solid var(--border);
-            color: var(--text-primary);
-            cursor: pointer;
+            padding: 8px 16px;
             border-radius: var(--radius);
-            font-size: 12px;
+            border: 1px solid var(--border);
+            background: var(--bg-tertiary);
+            color: var(--text-primary);
+            font-size: 13px;
+            cursor: pointer;
+            transition: all 0.15s;
             font-weight: 500;
-            transition: all 0.2s;
         }
 
         .btn:hover {
             background: var(--bg-hover);
-            border-color: var(--accent);
+            border-color: var(--text-muted);
         }
 
         .btn-danger {
-            background: var(--error);
-            color: #fff;
-            border: none;
+            border-color: rgba(248, 81, 73, 0.3);
+            color: var(--error);
         }
 
         .btn-danger:hover {
-            opacity: 0.8;
+            background: rgba(248, 81, 73, 0.15);
+            border-color: var(--error);
         }
 
-        /* Console */
-        .console-container {
+        /* Stats Bar */
+        .stats-bar {
+            background: var(--bg-secondary);
+            border-bottom: 1px solid var(--border);
+            padding: 12px 20px;
+            display: flex;
+            gap: 24px;
+            font-size: 12px;
+            flex-shrink: 0;
+        }
+
+        .stat {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            color: var(--text-secondary);
+        }
+
+        .stat-label {
+            font-weight: 500;
+        }
+
+        .stat-value {
+            color: var(--text-primary);
+            font-weight: 600;
+            font-family: var(--font-mono);
+        }
+
+        .progress-bar {
+            flex: 1;
+            height: 4px;
+            background: var(--bg-tertiary);
+            border-radius: 2px;
+            overflow: hidden;
+            margin: 0 12px;
+        }
+
+        .progress-fill {
+            height: 100%;
+            background: linear-gradient(90deg, var(--accent), var(--success));
+            transition: width 0.3s ease;
+        }
+
+        /* Output Console */
+        .console {
             flex: 1;
             overflow-y: auto;
-            padding: 20px;
+            padding: 16px 20px;
+            font-family: var(--font-mono);
+            font-size: 12px;
+            line-height: 1.6;
         }
 
         .console-line {
+            margin-bottom: 8px;
+            padding: 8px 12px;
+            border-radius: 6px;
             display: flex;
             gap: 12px;
-            padding: 8px 0;
-            border-bottom: 1px solid var(--bg-tertiary);
+            animation: fadeIn 0.2s ease;
         }
 
-        .console-line.hidden {
-            display: none;
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(-4px); }
+            to { opacity: 1; transform: translateY(0); }
         }
 
         .console-timestamp {
             color: var(--text-muted);
-            font-family: var(--font-mono);
-            font-size: 11px;
+            font-size: 10px;
             min-width: 80px;
             flex-shrink: 0;
         }
@@ -331,259 +374,218 @@ export class AgentViewProvider {
         .console-content {
             flex: 1;
             word-break: break-word;
-            font-family: var(--font-mono);
-            line-height: 1.5;
         }
 
-        .console-line.thought .console-content {
-            color: var(--text-primary);
-        }
-
-        .console-line.error .console-content {
-            color: var(--error);
-        }
-
-        /* Tool Cards */
-        .tool-card {
+        .console-line.thought {
             background: var(--bg-secondary);
+            color: var(--text-secondary);
+        }
+
+        .console-line.tool {
+            background: rgba(88, 166, 255, 0.1);
+            border-left: 3px solid var(--accent);
+        }
+
+        .console-line.result {
+            background: rgba(63, 185, 80, 0.1);
+            border-left: 3px solid var(--success);
+        }
+
+        .console-line.error {
+            background: rgba(248, 81, 73, 0.1);
+            border-left: 3px solid var(--error);
+            color: #ffa198;
+        }
+
+        /* Tool Execution Card */
+        .tool-card {
+            background: var(--bg-tertiary);
             border: 1px solid var(--border);
             border-radius: var(--radius);
-            margin-bottom: 16px;
-            overflow: hidden;
+            padding: 12px;
+            margin-bottom: 12px;
+            animation: slideIn 0.3s ease;
         }
 
-        .tool-card.hidden {
-            display: none;
+        @keyframes slideIn {
+            from { opacity: 0; transform: translateX(-8px); }
+            to { opacity: 1; transform: translateX(0); }
         }
 
         .tool-header {
             display: flex;
             align-items: center;
-            gap: 8px;
-            padding: 12px 16px;
-            background: var(--bg-tertiary);
-            cursor: pointer;
-            user-select: none;
-        }
-
-        .tool-header:hover {
-            background: var(--bg-hover);
+            gap: 10px;
+            margin-bottom: 8px;
+            font-weight: 600;
+            color: var(--accent);
         }
 
         .tool-icon {
             font-size: 16px;
         }
 
-        .tool-name {
-            flex: 1;
-            font-weight: 600;
-        }
-
-        .tool-chevron {
-            color: var(--text-muted);
-            transition: transform 0.2s;
-        }
-
-        .tool-card.collapsed .tool-chevron {
-            transform: rotate(-90deg);
-        }
-
-        .tool-body {
-            padding: 16px;
-        }
-
-        .tool-card.collapsed .tool-body {
-            display: none;
-        }
-
         .tool-section {
-            margin-bottom: 12px;
-        }
-
-        .tool-section:last-child {
-            margin-bottom: 0;
+            margin-top: 8px;
+            padding-top: 8px;
+            border-top: 1px solid var(--border);
         }
 
         .tool-section-title {
-            color: var(--text-secondary);
-            font-size: 11px;
-            font-weight: 600;
-            text-transform: uppercase;
-            margin-bottom: 8px;
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-        }
-
-        .copy-btn {
-            padding: 4px 8px;
-            background: var(--bg-hover);
-            border: 1px solid var(--border);
-            color: var(--text-secondary);
-            cursor: pointer;
-            border-radius: 4px;
             font-size: 10px;
-            transition: all 0.2s;
-        }
-
-        .copy-btn:hover {
-            background: var(--accent);
-            color: #000;
-            border-color: var(--accent);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            color: var(--text-muted);
+            margin-bottom: 6px;
+            font-weight: 600;
         }
 
         .tool-code {
             background: var(--bg-primary);
-            border: 1px solid var(--border);
-            border-radius: calc(var(--radius) - 2px);
-            padding: 12px;
-            font-family: var(--font-mono);
-            font-size: 12px;
+            border-radius: 4px;
+            padding: 8px;
+            font-size: 11px;
+            color: var(--text-secondary);
             overflow-x: auto;
-            white-space: pre-wrap;
-            word-break: break-all;
+            max-height: 200px;
+            overflow-y: auto;
         }
 
-        /* Syntax Highlighting */
-        .hl-key { color: #79c0ff; }
-        .hl-string { color: #a5d6ff; }
-        .hl-number { color: #79c0ff; }
-        .hl-boolean { color: #ff7b72; }
-        .hl-null { color: #ff7b72; }
+        /* Input Box */
+        .input-box {
+            background: var(--bg-secondary);
+            border-top: 1px solid var(--border);
+            padding: 16px 20px;
+            display: flex;
+            gap: 12px;
+            flex-shrink: 0;
+        }
 
+        .input {
+            flex: 1;
+            background: var(--bg-tertiary);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            padding: 10px 14px;
+            color: var(--text-primary);
+            font-size: 13px;
+            outline: none;
+            transition: all 0.15s;
+        }
+
+        .input:focus {
+            border-color: var(--accent);
+            background: var(--bg-hover);
+        }
+
+        .input::placeholder {
+            color: var(--text-muted);
+        }
+
+        /* Scrollbar */
+        ::-webkit-scrollbar { width: 10px; height: 10px; }
+        ::-webkit-scrollbar-track { background: var(--bg-primary); }
+        ::-webkit-scrollbar-thumb {
+            background: var(--bg-tertiary);
+            border-radius: 5px;
+            border: 2px solid var(--bg-primary);
+        }
+        ::-webkit-scrollbar-thumb:hover { background: var(--bg-hover); }
+
+        /* Empty State */
         .empty-state {
             display: flex;
             flex-direction: column;
             align-items: center;
             justify-content: center;
-            padding: 60px 20px;
+            height: 100%;
             color: var(--text-muted);
+            gap: 12px;
         }
 
         .empty-icon {
             font-size: 48px;
-            margin-bottom: 16px;
+            opacity: 0.5;
         }
 
         .empty-text {
             font-size: 14px;
         }
-
-        /* Stats */
-        .stats {
-            display: flex;
-            gap: 20px;
-            margin-left: auto;
-        }
-
-        .stat {
-            text-align: right;
-        }
-
-        .stat-label {
-            color: var(--text-muted);
-            font-size: 11px;
-            margin-bottom: 2px;
-        }
-
-        .stat-value {
-            font-family: var(--font-mono);
-            font-size: 14px;
-            font-weight: 600;
-        }
     </style>
 </head>
 <body>
     <div class="header">
+        <div class="agent-icon" id="agentIcon">🤖</div>
         <div class="agent-info">
-            <div class="agent-name" id="agentName">Agent</div>
-            <div class="agent-task" id="agentTask">Idle</div>
+            <div class="agent-name">
+                <span id="agentName">Agent</span>
+                <span class="status-badge" id="statusBadge">idle</span>
+            </div>
+            <div class="agent-task" id="agentTask">No task assigned</div>
         </div>
-        <div class="status-badge" id="statusBadge">idle</div>
-        <div class="stats">
-            <div class="stat">
-                <div class="stat-label">Iterations</div>
-                <div class="stat-value">
-                    <span id="iterations">0</span><span id="maxIterations">/30</span>
-                </div>
-            </div>
-            <div class="stat">
-                <div class="stat-label">Tools</div>
-                <div class="stat-value" id="toolCount">0</div>
-            </div>
-            <div class="stat">
-                <div class="stat-label">Elapsed</div>
-                <div class="stat-value" id="elapsed">0s</div>
-            </div>
+        <div class="header-actions">
+            <button class="btn" onclick="clearConsole()">Clear</button>
+            <button class="btn btn-danger" onclick="stopAgent()" id="stopBtn">Stop</button>
         </div>
     </div>
 
-    <div class="toolbar">
-        <div class="filter-group">
-            <button class="filter-btn active" data-filter="all">All</button>
-            <button class="filter-btn" data-filter="thought">Thoughts</button>
-            <button class="filter-btn" data-filter="tool">Tools</button>
-            <button class="filter-btn" data-filter="error">Errors</button>
+    <div class="stats-bar">
+        <div class="stat">
+            <span class="stat-label">Iterations:</span>
+            <span class="stat-value" id="iterations">0</span>
+            <span class="stat-value" id="maxIterations">/ 30</span>
         </div>
-        <button class="btn" onclick="clearConsole()">Clear</button>
-        <button class="btn btn-danger" onclick="stopAgent()">Stop Agent</button>
+        <div class="progress-bar">
+            <div class="progress-fill" id="progressFill" style="width: 0%"></div>
+        </div>
+        <div class="stat">
+            <span class="stat-label">Elapsed:</span>
+            <span class="stat-value" id="elapsed">0s</span>
+        </div>
+        <div class="stat">
+            <span class="stat-label">Tools:</span>
+            <span class="stat-value" id="toolCount">0</span>
+        </div>
     </div>
 
-    <div class="console-container" id="console">
+    <div class="console" id="console">
         <div class="empty-state">
             <div class="empty-icon">🚀</div>
             <div class="empty-text">Waiting for agent output...</div>
         </div>
     </div>
 
+    <div class="input-box">
+        <input
+            type="text"
+            class="input"
+            id="messageInput"
+            placeholder="Send a message to the agent..."
+            onkeydown="if(event.key==='Enter') sendMessage()"
+        >
+        <button class="btn" onclick="sendMessage()">Send</button>
+    </div>
+
     <script>
         const vscode = acquireVsCodeApi();
-
         let agent = null;
         let startTime = null;
         let elapsedInterval = null;
         let toolExecutionCount = 0;
-        let currentFilter = 'all';
 
-        // Filter handling
-        document.querySelectorAll('.filter-btn').forEach(btn => {
-            btn.addEventListener('click', () => {
-                document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
-                btn.classList.add('active');
-                currentFilter = btn.dataset.filter;
-                applyFilter();
-            });
-        });
-
-        function applyFilter() {
-            const console = document.getElementById('console');
-            const items = console.children;
-
-            for (let item of items) {
-                if (currentFilter === 'all') {
-                    item.classList.remove('hidden');
-                } else if (item.classList.contains('console-line')) {
-                    if (item.classList.contains(currentFilter)) {
-                        item.classList.remove('hidden');
-                    } else {
-                        item.classList.add('hidden');
-                    }
-                } else if (item.classList.contains('tool-card')) {
-                    if (currentFilter === 'tool') {
-                        item.classList.remove('hidden');
-                    } else {
-                        item.classList.add('hidden');
-                    }
-                }
-            }
-        }
+        const agentEmojis = {
+            testing: '🧪', frontend: '🎨', backend: '⚙️',
+            browser: '🌐', cleaner: '🧹', general: '🔧'
+        };
 
         function updateAgent(data) {
             agent = data;
-            if (!startTime) startTime = new Date(data.startTime);
+            startTime = new Date(data.startTime);
 
+            const emoji = agentEmojis[data.type] || '🤖';
+            document.getElementById('agentIcon').textContent = emoji;
             document.getElementById('agentName').textContent = data.name;
-            document.getElementById('agentTask').textContent = data.task || 'No task';
+            document.getElementById('agentTask').textContent = data.task;
 
             const statusBadge = document.getElementById('statusBadge');
             statusBadge.textContent = data.status;
@@ -591,6 +593,9 @@ export class AgentViewProvider {
 
             document.getElementById('iterations').textContent = data.iterations || 0;
             document.getElementById('maxIterations').textContent = '/ ' + (data.maxIterations || 30);
+
+            const progress = ((data.iterations || 0) / (data.maxIterations || 30)) * 100;
+            document.getElementById('progressFill').style.width = progress + '%';
 
             if (data.status === 'running' && !elapsedInterval) {
                 elapsedInterval = setInterval(updateElapsed, 1000);
@@ -621,17 +626,13 @@ export class AgentViewProvider {
             const emptyState = console.querySelector('.empty-state');
             if (emptyState) emptyState.remove();
 
-            if (msg.type === 'tool') {
-                appendToolExecution(msg);
-                return;
-            }
-
             // For streaming thoughts, append to the last line if it's the same type
             const lastLine = console.lastElementChild;
             const isSameType = lastLine && lastLine.classList.contains('console-line') &&
-                               lastLine.classList.contains(msg.type);
+                               lastLine.classList.contains(msg.outputType || 'thought');
 
-            if (isSameType && msg.type === 'thought') {
+            if (isSameType && (msg.outputType === 'thought' || !msg.outputType)) {
+                // Append to existing line
                 const content = lastLine.querySelector('.console-content');
                 if (content) {
                     content.textContent += msg.content;
@@ -640,9 +641,9 @@ export class AgentViewProvider {
                 }
             }
 
-            // Create new line
+            // Create new line for different types or first message
             const line = document.createElement('div');
-            line.className = 'console-line ' + msg.type;
+            line.className = 'console-line ' + (msg.outputType || 'thought');
 
             const timestamp = document.createElement('div');
             timestamp.className = 'console-timestamp';
@@ -656,7 +657,6 @@ export class AgentViewProvider {
             line.appendChild(content);
             console.appendChild(line);
 
-            applyFilter();
             console.scrollTop = console.scrollHeight;
         }
 
@@ -668,86 +668,38 @@ export class AgentViewProvider {
             toolExecutionCount++;
             document.getElementById('toolCount').textContent = toolExecutionCount;
 
-            const data = JSON.parse(msg.content);
             const card = document.createElement('div');
             card.className = 'tool-card';
 
-            let html = '<div class="tool-header" onclick="toggleToolCard(this)">';
+            let html = '<div class="tool-header">';
             html += '<span class="tool-icon">🔧</span>';
-            html += '<span class="tool-name">' + escapeHtml(data.tool) + '</span>';
-            html += '<span class="tool-chevron">▼</span>';
+            html += '<span>' + escapeHtml(msg.tool) + '</span>';
             html += '</div>';
-            html += '<div class="tool-body">';
 
-            if (data.params && Object.keys(data.params).length > 0) {
-                const paramsJson = JSON.stringify(data.params, null, 2);
+            if (msg.params && Object.keys(msg.params).length > 0) {
                 html += '<div class="tool-section">';
-                html += '<div class="tool-section-title">';
-                html += 'Parameters';
-                html += '<button class="copy-btn" onclick="copyToClipboard(event, ' + escapeHtml(JSON.stringify(paramsJson)) + ')">Copy</button>';
-                html += '</div>';
-                html += '<div class="tool-code">' + highlightJson(paramsJson) + '</div>';
+                html += '<div class="tool-section-title">Parameters</div>';
+                html += '<div class="tool-code">' + escapeHtml(JSON.stringify(msg.params, null, 2)) + '</div>';
                 html += '</div>';
             }
 
-            if (data.result) {
-                const resultJson = JSON.stringify(data.result, null, 2);
+            if (msg.result) {
                 html += '<div class="tool-section">';
-                html += '<div class="tool-section-title">';
-                html += 'Result';
-                html += '<button class="copy-btn" onclick="copyToClipboard(event, ' + escapeHtml(JSON.stringify(resultJson)) + ')">Copy</button>';
-                html += '</div>';
-                html += '<div class="tool-code">' + highlightJson(resultJson) + '</div>';
+                html += '<div class="tool-section-title">Result</div>';
+                html += '<div class="tool-code">' + escapeHtml(JSON.stringify(msg.result, null, 2)) + '</div>';
                 html += '</div>';
             }
 
-            if (data.error) {
-                const errorText = typeof data.error === 'string' ? data.error : JSON.stringify(data.error, null, 2);
+            if (msg.error) {
                 html += '<div class="tool-section">';
-                html += '<div class="tool-section-title">';
-                html += 'Error';
-                html += '<button class="copy-btn" onclick="copyToClipboard(event, ' + escapeHtml(JSON.stringify(errorText)) + ')">Copy</button>';
-                html += '</div>';
-                html += '<div class="tool-code" style="color: var(--error)">' + escapeHtml(errorText) + '</div>';
+                html += '<div class="tool-section-title">Error</div>';
+                html += '<div class="tool-code" style="color: var(--error)">' + escapeHtml(msg.error) + '</div>';
                 html += '</div>';
             }
 
-            html += '</div>';
             card.innerHTML = html;
             console.appendChild(card);
-
-            applyFilter();
             console.scrollTop = console.scrollHeight;
-        }
-
-        function toggleToolCard(header) {
-            const card = header.parentElement;
-            card.classList.toggle('collapsed');
-        }
-
-        function highlightJson(json) {
-            return json
-                .replace(/&/g, '&amp;')
-                .replace(/</g, '&lt;')
-                .replace(/>/g, '&gt;')
-                .replace(/"([^"]+)":/g, '<span class="hl-key">"$1"</span>:')
-                .replace(/: "([^"]*)"/g, ': <span class="hl-string">"$1"</span>')
-                .replace(/: (-?\d+\.?\d*)/g, ': <span class="hl-number">$1</span>')
-                .replace(/: (true|false)/g, ': <span class="hl-boolean">$1</span>')
-                .replace(/: null/g, ': <span class="hl-null">null</span>');
-        }
-
-        function copyToClipboard(event, text) {
-            event.stopPropagation();
-            const unescaped = JSON.parse(text);
-            vscode.postMessage({ command: 'copy', text: unescaped });
-
-            const btn = event.target;
-            const originalText = btn.textContent;
-            btn.textContent = 'Copied!';
-            setTimeout(() => {
-                btn.textContent = originalText;
-            }, 2000);
         }
 
         function escapeHtml(text) {
@@ -768,6 +720,14 @@ export class AgentViewProvider {
             vscode.postMessage({ command: 'stop' });
         }
 
+        function sendMessage() {
+            const input = document.getElementById('messageInput');
+            if (input.value.trim()) {
+                vscode.postMessage({ command: 'continue', text: input.value });
+                input.value = '';
+            }
+        }
+
         window.addEventListener('message', event => {
             const message = event.data;
 
@@ -778,10 +738,30 @@ export class AgentViewProvider {
                         message.output.forEach(appendOutput);
                     }
                     break;
+                case 'output':
+                    appendOutput(message.message);
+                    break;
+                case 'tool':
+                    appendToolExecution(message.message);
+                    break;
             }
         });
     </script>
 </body>
 </html>`;
     }
+}
+
+interface OutputMessage {
+    timestamp: string;
+    content: string;
+    type: 'thought' | 'tool' | 'result' | 'error';
+}
+
+interface ToolExecutionMessage {
+    timestamp: string;
+    tool: string;
+    params: any;
+    result?: any;
+    error?: string;
 }

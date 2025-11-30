@@ -367,17 +367,33 @@ export class SafetyGuardrails {
     private async checkPythonSyntax(content: string): Promise<ValidationResult> {
         const errors: string[] = [];
         const tempFile = path.join(os.tmpdir(), `.liftoff_syntax_${Date.now()}.py`);
-        
+
         try {
             await fs.writeFile(tempFile, content);
             try {
                 await execAsync(`python -m py_compile "${tempFile}"`);
             } catch (e: any) {
-                errors.push(e.stderr || e.message);
+                // Extract meaningful error from Python output
+                const errorMsg = e.stderr || e.message || '';
+                const lines = errorMsg.split('\n').filter((l: string) => l.trim());
+
+                // Find the actual syntax error line
+                const syntaxError = lines.find((l: string) => l.includes('SyntaxError') || l.includes('Error'));
+                if (syntaxError) {
+                    errors.push(`Python ${syntaxError}`);
+                } else if (lines.length > 0) {
+                    errors.push(`Python validation failed: ${lines[lines.length - 1]}`);
+                } else {
+                    errors.push('Python syntax error (unknown)');
+                }
             } finally {
-                await fs.unlink(tempFile).catch(() => {});
+                // Cleanup temp file (don't throw on failure)
+                try {
+                    await fs.unlink(tempFile);
+                } catch {}
             }
         } catch (e: any) {
+            // If we can't write temp file, skip validation with warning
             return { valid: true, errors: [], warnings: [`Could not validate Python syntax: ${e.message}`] };
         }
         return { valid: errors.length === 0, errors, warnings: [] };
@@ -386,7 +402,7 @@ export class SafetyGuardrails {
     private async checkTypeScriptSyntax(content: string): Promise<ValidationResult> {
         const errors: string[] = [];
         const tempFile = path.join(os.tmpdir(), `.liftoff_syntax_${Date.now()}.ts`);
-        
+
         try {
             await fs.writeFile(tempFile, content);
             try {
@@ -395,10 +411,15 @@ export class SafetyGuardrails {
                 const output = e.stdout || e.stderr || e.message;
                 const lines = output.split('\n').filter((l: string) => l.includes('error TS'));
                 if (lines.length > 0) {
-                    errors.push(...lines.slice(0, 5));
+                    errors.push(...lines.slice(0, 5)); // Show first 5 errors max
+                } else if (output) {
+                    errors.push(`TypeScript validation failed: ${output.split('\n')[0]}`);
                 }
             } finally {
-                await fs.unlink(tempFile).catch(() => {});
+                // Cleanup temp file (don't throw on failure)
+                try {
+                    await fs.unlink(tempFile);
+                } catch {}
             }
         } catch (e: any) {
             return { valid: true, errors: [], warnings: [`Could not validate TypeScript syntax: ${e.message}`] };

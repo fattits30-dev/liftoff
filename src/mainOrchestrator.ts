@@ -29,6 +29,8 @@ import { AutonomousAgentManager, Agent } from './autonomousAgent';
 import { SemanticMemoryStore, OrchestratorMemory } from './memory/agentMemory';
 import { DEFAULT_CLOUD_MODEL_NAME, LIMITS } from './config';
 import { AgentType } from './types/agentTypes';
+import { getUnifiedToolDescription, UnifiedExecutor } from './mcp/unified-executor';
+import { getMcpRouter } from './mcp';
 
 export interface TodoItem {
     task: string;
@@ -48,58 +50,120 @@ type OrchestratorStatus = 'idle' | 'planning' | 'delegating' | 'waiting' | 'comp
 
 const MAX_RETRIES = 3;
 
-const PLANNER_SYSTEM_PROMPT = `You are the Liftoff Orchestrator - a planning brain that delegates work to specialized agents.
+function buildPlannerSystemPrompt(mcpTools?: string): string {
+    return `You are the Liftoff Orchestrator - a planning brain that RESEARCHES and DELEGATES work to specialized agents.
 
 ## YOUR ROLE
-You PLAN and DELEGATE. You do NOT execute code yourself.
-You analyze tasks and assign them to the right specialist agent.
+You RESEARCH, PLAN, and DELEGATE. You analyze tasks, research best practices, then assign work to the right specialist agent.
+
+## CRITICAL: RESEARCH FIRST, THEN DELEGATE
+BEFORE delegating ANY task, you MUST research:
+1. **Use context7 to get current library documentation**
+   - React, Supabase, Tailwind, shadcn/ui, etc.
+   - Get current APIs, best practices, latest patterns
+2. **Make informed architectural decisions**
+   - Choose the RIGHT tech stack based on requirements
+   - Don't assume - research what's best for THIS specific use case
+3. **Provide agents with enriched context**
+   - Include relevant docs snippets in delegation tasks
+   - Reference specific APIs/patterns from research
 
 ## AVAILABLE AGENTS
 - **frontend** 🎨 - React, Vue, CSS, HTML, UI components, styling
-- **backend** ⚙️ - APIs, databases, Python, Node.js servers, business logic  
+- **backend** ⚙️ - APIs, databases, Python, Node.js servers, business logic
 - **testing** 🧪 - Run tests, fix test failures, write new tests
 - **browser** 🌐 - Playwright automation, UI testing, screenshots
 - **cleaner** 🧹 - Remove dead code, fix linting, format files
 - **general** 🔧 - File operations, git, misc tasks that don't fit above
 
+## HOW TO USE TOOLS
+Use this format to call MCP tools:
+\`\`\`tool
+{"name": "resolve-library-id", "params": {"library": "react"}}
+\`\`\`
+\`\`\`tool
+{"name": "get-library-docs", "params": {"library_id": "...", "query": "..."}}
+\`\`\`
+
+**Available Tools:**
+${mcpTools || 'Loading MCP tools...'}
+
 ## HOW TO DELEGATE
 Output this EXACT format to assign work:
 \`\`\`delegate
-{"agent": "frontend", "task": "Fix the button styling in src/components/Button.tsx"}
+{"agent": "frontend", "task": "Create LoginForm using React hooks. Based on React docs, use useState for form state..."}
 \`\`\`
 
 ## WORKFLOW
 1. User gives you a task
-2. You break it down into steps
-3. For each step, DELEGATE to the right agent
-4. Wait for result (I'll tell you success/failure)
-5. If failed: analyze error, maybe retry with different approach
-6. If succeeded: move to next step
-7. When ALL done: output \`\`\`complete\`\`\` with summary
+2. **RESEARCH PHASE** - Use context7 to understand requirements
+   - What libraries are best for this?
+   - What are current best practices?
+   - What APIs/patterns should we use?
+3. **PLANNING PHASE** - Break down into steps with informed decisions
+4. **DELEGATION PHASE** - For each step, delegate with enriched context
+5. Wait for result, continue or retry
+6. When ALL done: output \`\`\`complete\`\`\` with summary
+
+## AGENT SUPERVISION
+You can MONITOR agents in real-time:
+- I'll alert you if an agent gets stuck (infinite loops, repeated errors, thrashing)
+- You can see what agents are doing through their output streams
+- If something goes wrong, you can KILL an agent and try a different approach
+
+When an agent is stuck, you can:
+1. Kill it and retry with clearer instructions
+2. Kill it and delegate to a different agent type
+3. Let it continue if you think it will recover
 
 ## RULES
+- **ALWAYS research BEFORE first delegation** - Use context7 to look up best stack
 - ONE delegation at a time - wait for result before next
-- Be SPECIFIC in task descriptions - agents work better with clear instructions
+- Include research findings in delegation tasks
+- Be SPECIFIC and include relevant documentation references
+- Monitor agent behavior - if stuck or misbehaving, intervene
 - If an agent fails 3 times on same task, I'll mark it as TODO and you continue
 - DON'T delegate tiny tasks - combine related work into meaningful chunks
-- Frontend + styling = frontend agent (not separate agents)
-- Running tests + fixing failures = testing agent handles both
 
 ## EXAMPLE INTERACTION
-User: "Add a login form and make sure it works"
+User: "Build a recipe app with meal planning"
 
-You: I'll break this down:
-1. Create the login form component (frontend)
-2. Add form validation (frontend) 
-3. Test the form works (testing)
+You: Let me research the best stack for this type of application.
+
+\`\`\`tool
+{"name": "resolve-library-id", "params": {"library": "react"}}
+\`\`\`
+
+[After getting React library ID]
+
+\`\`\`tool
+{"name": "get-library-docs", "params": {"library_id": "react-...", "query": "hooks useState useEffect"}}
+\`\`\`
+
+\`\`\`tool
+{"name": "resolve-library-id", "params": {"library": "supabase-js"}}
+\`\`\`
+
+[After researching]
+
+Based on research:
+- React 18 with hooks for frontend
+- Supabase for backend (PostgreSQL + auth + realtime)
+- Tailwind + shadcn/ui for styling
+
+Breaking down into tasks:
+1. Set up React project structure (frontend)
+2. Configure Supabase client (frontend)
+3. Create database schema (backend)
 
 Starting with step 1:
 \`\`\`delegate
-{"agent": "frontend", "task": "Create a login form component at src/components/LoginForm.tsx with email and password fields, submit button, and basic validation"}
+{"agent": "frontend", "task": "Set up React 18 project with Vite. Based on React docs, use createRoot API and StrictMode. Install react-router-dom for routing. Configure Tailwind CSS."}
 \`\`\`
 
-[After success, you continue to next step or adjust based on result]
+[Continue after success...]
 `;
+}
 
 
 /**
@@ -114,12 +178,17 @@ export class MainOrchestrator {
     private abortController: AbortController | null = null;
     private iterations: number = 0;
     private workspaceRoot: string;
+    private agentOutputBuffers: Map<string, string[]> = new Map(); // Track agent outputs for supervision
 
     // Retry tracking: task -> attempt count
     private retryTracker: Map<string, number> = new Map();
     
     // TODO list for tasks that failed after max retries
     private todoList: TodoItem[] = [];
+
+    // Agent pool management
+    private activeAgents: Set<string> = new Set();
+    private readonly MAX_CONCURRENT_AGENTS = 6;
 
     // Memory systems
     private semanticMemory: SemanticMemoryStore | null = null;
@@ -164,10 +233,12 @@ export class MainOrchestrator {
         this.semanticMemory = semanticMemory || null;
         this.orchestratorMemory = orchestratorMemory || null;
 
-        // Initialize with planner system prompt
+        // Initialize with planner system prompt (includes MCP tools)
+        const mcpRouter = getMcpRouter();
+        const mcpToolsDescription = mcpRouter ? mcpRouter.getToolsCompact() : '';
         this.messages.push({
             role: 'system',
-            content: PLANNER_SYSTEM_PROMPT,
+            content: buildPlannerSystemPrompt(mcpToolsDescription),
             timestamp: new Date()
         });
 
@@ -179,12 +250,119 @@ export class MainOrchestrator {
      */
     setAgentManager(manager: AutonomousAgentManager): void {
         this.agentManager = manager;
-        this.log('Agent manager connected');
+
+        // Subscribe to agent events for monitoring
+        manager.onAgentOutput(({ agentId, content, type }) => {
+            // Buffer agent outputs for orchestrator to review
+            if (!this.agentOutputBuffers.has(agentId)) {
+                this.agentOutputBuffers.set(agentId, []);
+            }
+            const buffer = this.agentOutputBuffers.get(agentId)!;
+            buffer.push(`[${type}] ${content}`);
+
+            // Keep last 50 messages per agent
+            if (buffer.length > 50) {
+                this.agentOutputBuffers.set(agentId, buffer.slice(-50));
+            }
+        });
+
+        // Subscribe to stuck agent events - orchestrator can intervene
+        manager.onAgentStuck(({ agentId, agent, reason, evidence, suggestion }) => {
+            this.log(`⚠️ Agent ${agentId} stuck: ${reason}`);
+            this._onThought.fire(`\n⚠️ Detected ${agent.name} is stuck: ${reason}\nEvidence: ${evidence.join(', ')}\nSuggestion: ${suggestion}`);
+            // Orchestrator can decide to kill or let it continue
+        });
+
+        this.log('Agent manager connected with monitoring');
     }
 
-    setApiKey(apiKey: string): void {
+    async setApiKey(apiKey: string): Promise<void> {
         this.hfProvider = new HuggingFaceProvider(apiKey);
+
+        // Initialize MCP router with tools
+        await this.initializeMcpTools();
+
         this.log('API key configured');
+    }
+
+    /**
+     * Initialize MCP tools (context7, serena, etc.)
+     */
+    private async initializeMcpTools(): Promise<void> {
+        this.log('=== MCP INITIALIZATION START ===');
+        try {
+            this.log(`1. Getting MCP router...`);
+            const mcpRouter = getMcpRouter();
+            
+            this.log(`2. Loading config from: ${this.workspaceRoot}`);
+            const configs = await mcpRouter.loadConfig(this.workspaceRoot);
+            this.log(`   Found ${configs.length} server configs`);
+
+            if (configs.length === 0) {
+                this.log('   ⚠️ No MCP servers configured - skipping');
+                return;
+            }
+
+            this.log(`3. Connecting to ${configs.length} servers...`);
+            for (const cfg of configs) {
+                this.log(`   - ${cfg.name}: ${cfg.command} ${cfg.args?.join(' ')}`);
+            }
+            
+            await mcpRouter.connectAll(configs);
+            this.log(`   ✓ All servers connected`);
+
+            this.log(`4. Getting available tools...`);
+            const mcpToolsDescription = mcpRouter.getToolsCompact();
+            const toolCount = mcpToolsDescription.split('\n').filter(l => l.trim()).length;
+            this.log(`   ✓ Found ${toolCount} tools`);
+            this.log(`   Tools:\n${mcpToolsDescription}`);
+
+            this.log(`5. Updating system prompt...`);
+            const newPrompt = buildPlannerSystemPrompt(mcpToolsDescription);
+            this.messages[0] = {
+                role: 'system',
+                content: newPrompt,
+                timestamp: new Date()
+            };
+            this.log(`   ✓ System prompt updated (${newPrompt.length} chars)`);
+
+            this.log(`=== MCP INITIALIZATION COMPLETE ===`);
+            this.log(`   ${configs.length} servers, ${toolCount} tools ready`);
+        } catch (err: any) {
+            this.log(`✗ MCP initialization failed: ${err.message}`);
+            this.log(`   Stack: ${err.stack}`);
+        }
+    }
+
+    /**
+     * Kill a misbehaving agent
+     */
+    killAgent(agentId: string, reason: string = 'Terminated by orchestrator'): void {
+        if (!this.agentManager) return;
+
+        const agent = this.agentManager.getAgent(agentId);
+        if (agent) {
+            this.log(`🔪 Killing agent ${agent.name}: ${reason}`);
+            this._onThought.fire(`\n🔪 Terminating ${agent.name}: ${reason}`);
+            this.agentManager.killAgent(agentId);
+            this.activeAgents.delete(agentId);
+            this.agentOutputBuffers.delete(agentId);
+        }
+    }
+
+    /**
+     * Get agent's recent output (for supervision)
+     */
+    getAgentOutput(agentId: string): string[] {
+        return this.agentOutputBuffers.get(agentId) || [];
+    }
+
+    /**
+     * Get all running agents
+     */
+    getRunningAgents(): Agent[] {
+        if (!this.agentManager) return [];
+        return this.agentManager.getRunningAgents();
     }
 
 
@@ -244,17 +422,26 @@ export class MainOrchestrator {
                 return `✅ ${summary}`;
             }
 
+            // Check for tool call (research)
+            const toolCall = this.parseToolCall(thought);
+            if (toolCall) {
+                this.log(`Tool call: ${toolCall.name}`);
+                const toolResult = await this.executeToolCall(toolCall);
+                this.addMessage('user', `Tool result: ${toolResult}`, true);
+                continue;
+            }
+
             // Check for delegation
             const delegation = this.parseDelegation(thought);
             if (!delegation) {
-                // No delegation - prompt for action
-                this.addMessage('user', 'Please delegate to an agent using ```delegate\n{"agent": "type", "task": "description"}\n``` or mark complete with ```complete```', true);
+                // No action - prompt for what to do next
+                this.addMessage('user', 'Please use a tool to research, delegate to an agent, or mark complete with ```complete```', true);
                 continue;
             }
 
             // Execute delegation
             const result = await this.executeDelegation(delegation);
-            
+
             // Feed result back to planner
             this.addMessage('user', result.message, true);
         }
@@ -322,8 +509,25 @@ export class MainOrchestrator {
         const attempts = (this.retryTracker.get(taskKey) || 0) + 1;
         this.retryTracker.set(taskKey, attempts);
 
+        // Check agent pool limit
+        if (this.activeAgents.size >= this.MAX_CONCURRENT_AGENTS) {
+            this._onThought.fire(`\n⏸️ Agent pool full (${this.activeAgents.size}/${this.MAX_CONCURRENT_AGENTS}). Waiting for an agent to complete...`);
+            this.log(`Agent pool limit reached, waiting...`);
+
+            // Wait a bit for agents to complete
+            await new Promise(resolve => setTimeout(resolve, 2000));
+
+            // If still full, fail gracefully
+            if (this.activeAgents.size >= this.MAX_CONCURRENT_AGENTS) {
+                return {
+                    success: false,
+                    message: `⚠️ Too many concurrent agents (${this.activeAgents.size}). Please wait for current tasks to complete before delegating more work.`
+                };
+            }
+        }
+
         this.log(`Delegating to ${delegation.agent} (attempt ${attempts}/${MAX_RETRIES}): ${delegation.task}`);
-        this._onThought.fire(`\n\n🚀 Spawning ${delegation.agent} agent (attempt ${attempts})...`);
+        this._onThought.fire(`\n\n🚀 Spawning ${delegation.agent} agent (attempt ${attempts})... [${this.activeAgents.size + 1}/${this.MAX_CONCURRENT_AGENTS} active]`);
         this.setStatus('delegating');
 
         try {
@@ -334,6 +538,9 @@ export class MainOrchestrator {
                 maxIterations: 50  // Agents get fewer iterations than orchestrator
             });
 
+            // Track active agent
+            this.activeAgents.add(agent.id);
+
             this._onAgentSpawned.fire({ agent, task: delegation.task });
             this._onThought.fire(`\n👷 ${agent.name} working on: ${delegation.task.substring(0, 60)}...`);
             this.setStatus('waiting');
@@ -341,14 +548,17 @@ export class MainOrchestrator {
             // Wait for agent to complete
             const result = await this.waitForAgent(agent.id);
 
-            this._onAgentCompleted.fire({ 
-                agent: result.agent, 
-                success: result.success, 
-                error: result.error 
+            // Remove from active pool
+            this.activeAgents.delete(agent.id);
+
+            this._onAgentCompleted.fire({
+                agent: result.agent,
+                success: result.success,
+                error: result.error
             });
 
             if (result.success) {
-                this._onThought.fire(`\n✅ ${agent.name} completed successfully`);
+                this._onThought.fire(`\n✅ ${agent.name} completed successfully [${this.activeAgents.size}/${this.MAX_CONCURRENT_AGENTS} active]`);
                 this.retryTracker.delete(taskKey);  // Clear retry counter on success
                 return {
                     success: true,
@@ -384,6 +594,7 @@ export class MainOrchestrator {
             }
         } catch (err: any) {
             this.log(`Delegation error: ${err.message}`);
+            // Note: Agent may not have been added to activeAgents if spawn failed
             return {
                 success: false,
                 message: `❌ Failed to spawn agent: ${err.message}`
@@ -480,6 +691,80 @@ export class MainOrchestrator {
     }
 
     /**
+     * Parse tool call from LLM response
+     */
+    private parseToolCall(response: string): { name: string; params: any } | null {
+        const match = response.match(/```tool\s*\n?\s*(\{[\s\S]*?\})\s*\n?```/);
+        if (!match) {
+            // Check if response mentions tools without proper format
+            if (response.toLowerCase().includes('resolve-library') || 
+                response.toLowerCase().includes('get-library-docs') ||
+                response.toLowerCase().includes('```tool')) {
+                this.log(`⚠️ Response mentions tools but format doesn't match. Response preview: ${response.substring(0, 500)}`);
+            }
+            return null;
+        }
+
+        try {
+            const parsed = JSON.parse(match[1]);
+            if (!parsed.name || typeof parsed.name !== 'string') {
+                this.log('✗ Missing or invalid tool name in parsed JSON');
+                return null;
+            }
+            this.log(`✓ Parsed tool call: ${parsed.name}`);
+            return { name: parsed.name, params: parsed.params || {} };
+        } catch (err) {
+            this.log(`✗ Failed to parse tool call JSON: ${err}`);
+            this.log(`   Matched text: ${match[1]}`);
+            return null;
+        }
+    }
+
+    /**
+     * Execute a tool call using MCP router
+     */
+    private async executeToolCall(toolCall: { name: string; params: any }): Promise<string> {
+        this.log(`=== TOOL CALL: ${toolCall.name} ===`);
+        this.log(`   Params: ${JSON.stringify(toolCall.params)}`);
+        this._onThought.fire(`\n🔧 Researching: ${toolCall.name}...`);
+
+        try {
+            const mcpRouter = getMcpRouter();
+            if (!mcpRouter) {
+                this.log('   ✗ ERROR: MCP router not initialized');
+                return 'Error: MCP router not initialized';
+            }
+
+            this.log(`   Router ready, calling tool...`);
+            const result = await mcpRouter.callTool(toolCall.name, toolCall.params);
+
+            this.log(`   Success: ${result.success}`);
+            if (result.success) {
+                this.log(`   Output length: ${result.output?.length || 0} chars`);
+                this.log(`   Output preview: ${result.output?.substring(0, 200)}`);
+            } else {
+                this.log(`   Error: ${result.error}`);
+                return `Error: ${result.error || 'Tool execution failed'}`;
+            }
+
+            // Truncate if very long
+            const resultStr = result.output || '';
+
+            if (resultStr.length > 2000) {
+                this.log(`   Truncating output from ${resultStr.length} to 2000 chars`);
+                return resultStr.substring(0, 2000) + '\n... (truncated)';
+            }
+            
+            this.log(`=== TOOL CALL COMPLETE ===`);
+            return resultStr;
+        } catch (err: any) {
+            this.log(`✗ Tool execution error: ${err.message}`);
+            this.log(`   Stack: ${err.stack}`);
+            return `Error: ${err.message}`;
+        }
+    }
+
+    /**
      * Extract summary from completion message
      */
     private extractSummary(response: string): string {
@@ -533,9 +818,11 @@ export class MainOrchestrator {
      * Reset conversation
      */
     reset(): void {
+        const mcpRouter = getMcpRouter();
+        const mcpToolsDescription = mcpRouter ? mcpRouter.getToolsCompact() : '';
         this.messages = [{
             role: 'system',
-            content: PLANNER_SYSTEM_PROMPT,
+            content: buildPlannerSystemPrompt(mcpToolsDescription),
             timestamp: new Date()
         }];
         this.iterations = 0;

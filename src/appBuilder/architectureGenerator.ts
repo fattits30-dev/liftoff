@@ -144,7 +144,7 @@ export class ArchitectureGenerator {
     /**
      * Convert entity field to column schema
      */
-    private fieldToColumn(field: EntityField, entity: Entity): ColumnSchema {
+    private fieldToColumn(field: EntityField, _entity: Entity): ColumnSchema {
         const column: ColumnSchema = {
             name: field.name,
             type: FIELD_TYPE_TO_PG[field.type] || 'TEXT',

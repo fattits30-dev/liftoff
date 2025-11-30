@@ -114,7 +114,7 @@ export class LoopDetector {
         // Check if any tool+params combo repeats too many times
         for (const [signature, count] of toolSignatures.entries()) {
             if (count >= this.TOOL_REPEAT_THRESHOLD) {
-                const [toolName, params] = signature.split(':');
+                const [toolName, _params] = signature.split(':');
                 return {
                     isStuck: true,
                     reason: 'Repeating same tool call',

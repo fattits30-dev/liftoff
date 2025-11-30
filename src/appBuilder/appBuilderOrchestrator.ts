@@ -178,8 +178,10 @@ export class AppBuilderOrchestrator {
                     // Fall through to next phases
                 case 'implement':
                     await this.runImplementationPhase(projectPath, savedState.spec, savedState.architecture);
+                    break;
                 case 'test':
                     await this.runTestPhase(projectPath);
+                    break;
                 case 'deploy':
                     // Optional deployment
                     break;
@@ -300,7 +302,7 @@ export class AppBuilderOrchestrator {
     private async runImplementationPhase(
         targetDir: string,
         spec: AppSpec,
-        architecture: Architecture
+        _architecture: Architecture
     ): Promise<void> {
         // Get ordered tasks for all features
         const featureTasks = getOrderedTasks(spec.features);
@@ -376,7 +378,7 @@ Please implement this task now.`;
         try {
             await this.scaffolder.runCommand('npm run test -- --run', targetDir);
             this.log('test', 'Tests passed', 'completed');
-        } catch (error) {
+        } catch (_error) {
             this.log('test', 'Some tests failed - check output', 'failed');
             this.buildState.todoItems.push('[TODO] Fix failing tests');
         }
@@ -411,7 +413,7 @@ Please implement this task now.`;
                 this.log('deploy', 'Deployed to Netlify', 'completed');
                 return `https://${spec.name}.netlify.app`;
             }
-        } catch (error) {
+        } catch (_error) {
             this.log('deploy', 'Deployment failed - add to TODO', 'failed');
             this.buildState.todoItems.push(`[TODO] Deploy to ${hosting}`);
         }
@@ -522,7 +524,7 @@ Please implement this task now.`;
     /**
      * Get default entities for app type
      */
-    private getDefaultEntities(appType: string): AppSpec['entities'] {
+    private getDefaultEntities(_appType: string): AppSpec['entities'] {
         // Simplified - full implementation in specGenerator
         return [
             {

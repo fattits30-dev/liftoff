@@ -1,0 +1,192 @@
+name: Claude AI Code Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches: [main, develop]
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+jobs:
+  claude-review:
+    name: AI-Powered Code Review
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Full history for better context
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Get PR diff
+        id: diff
+        run: |
+          # Get the diff for this PR
+          git diff origin/${{ github.base_ref }}...HEAD > pr_diff.txt
+
+          # Truncate if too large (max 50KB for API)
+          if [ $(wc -c < pr_diff.txt) -gt 51200 ]; then
+            echo "Diff too large, truncating..."
+            head -c 51200 pr_diff.txt > pr_diff_truncated.txt
+            mv pr_diff_truncated.txt pr_diff.txt
+            echo "TRUNCATED=true" >> $GITHUB_OUTPUT
+          else
+            echo "TRUNCATED=false" >> $GITHUB_OUTPUT
+          fi
+
+          # Save diff content for the next step
+          echo "DIFF_CONTENT<<EOF" >> $GITHUB_OUTPUT
+          cat pr_diff.txt >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Analyze with Claude
+        id: analyze
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          # Create a Node.js script to call Claude API
+          cat > analyze.js << 'SCRIPT'
+          const https = require('https');
+          const fs = require('fs');
+
+          const API_KEY = process.env.ANTHROPIC_API_KEY;
+          const diff = fs.readFileSync('pr_diff.txt', 'utf-8');
+
+          const prompt = `You are an expert code reviewer for a VS Code extension that builds AI-powered autonomous agents. Review this pull request diff and provide:
+
+          1. **Code Quality Issues** - Bugs, anti-patterns, edge cases
+          2. **Security Concerns** - Vulnerabilities, unsafe operations
+          3. **Performance Issues** - Inefficiencies, resource leaks
+          4. **Best Practices** - TypeScript patterns, VS Code extension guidelines
+          5. **Testing Gaps** - Missing tests or test cases
+          6. **Suggestions** - Improvements and alternatives
+
+          Be constructive, specific, and provide examples. Focus on significant issues, not nitpicks.
+
+          PULL REQUEST DIFF:
+          \`\`\`diff
+          ${diff}
+          \`\`\`
+
+          Provide your review in markdown format with clear sections.`;
+
+          const data = JSON.stringify({
+            model: 'claude-sonnet-4-20250514',
+            max_tokens: 4096,
+            messages: [{
+              role: 'user',
+              content: prompt
+            }]
+          });
+
+          const options = {
+            hostname: 'api.anthropic.com',
+            port: 443,
+            path: '/v1/messages',
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'x-api-key': API_KEY,
+              'anthropic-version': '2023-06-01'
+            }
+          };
+
+          const req = https.request(options, (res) => {
+            let body = '';
+            res.on('data', (chunk) => body += chunk);
+            res.on('end', () => {
+              if (res.statusCode === 200) {
+                const response = JSON.parse(body);
+                const review = response.content[0].text;
+                fs.writeFileSync('review.txt', review);
+                console.log('Review generated successfully');
+              } else {
+                console.error('API Error:', body);
+                process.exit(1);
+              }
+            });
+          });
+
+          req.on('error', (e) => {
+            console.error('Request error:', e);
+            process.exit(1);
+          });
+
+          req.write(data);
+          req.end();
+          SCRIPT
+
+          # Run the analysis
+          if [ -n "$ANTHROPIC_API_KEY" ]; then
+            node analyze.js || echo "⚠️ Claude API call failed. Review will be skipped."
+          else
+            echo "⚠️ ANTHROPIC_API_KEY not set. Skipping AI review."
+            echo "To enable AI reviews, add your Anthropic API key to GitHub Secrets."
+            exit 0
+          fi
+
+      - name: Post review comment
+        if: success()
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const fs = require('fs');
+
+            let review = '';
+            try {
+              review = fs.readFileSync('review.txt', 'utf-8');
+            } catch (e) {
+              console.log('No review file found, skipping...');
+              return;
+            }
+
+            const truncated = '${{ steps.diff.outputs.TRUNCATED }}' === 'true';
+            const warning = truncated ? '\n\n⚠️ **Note:** Diff was truncated due to size. Review may be incomplete.\n\n' : '';
+
+            const body = `## 🤖 Claude AI Code Review
+
+            ${warning}${review}
+
+            ---
+
+            *This review was automatically generated by Claude Sonnet 4. Please use your judgment when applying suggestions.*
+
+            💡 **Tips:**
+            - Address security and bug issues first
+            - Consider performance suggestions for hot paths
+            - Testing suggestions help prevent regressions
+
+            🔧 To disable AI reviews, remove \`ANTHROPIC_API_KEY\` from repository secrets.
+            `;
+
+            // Post as PR comment
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: body
+            });
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "## Claude AI Review Summary" >> $GITHUB_STEP_SUMMARY
+          if [ -f review.txt ]; then
+            echo "✅ AI review completed and posted to PR" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "⚠️ AI review skipped (no API key or error)" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "To enable AI reviews:" >> $GITHUB_STEP_SUMMARY
+            echo "1. Get an Anthropic API key from https://console.anthropic.com/" >> $GITHUB_STEP_SUMMARY
+            echo "2. Add it to GitHub Secrets as 'ANTHROPIC_API_KEY'" >> $GITHUB_STEP_SUMMARY
+            echo "3. AI reviews will run automatically on future PRs" >> $GITHUB_STEP_SUMMARY
+          fi

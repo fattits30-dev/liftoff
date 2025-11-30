@@ -49,6 +49,10 @@
         "title": "Liftoff: Set HuggingFace API Key"
       },
       {
+        "command": "liftoff.testMcpTools",
+        "title": "Liftoff: Test MCP Tools"
+      },
+      {
         "command": "liftoff.initMcp",
         "title": "Liftoff: Initialize MCP Config"
       },
@@ -102,28 +106,47 @@
     },
     "menus": {
       "commandPalette": [
-        { "command": "liftoff.openManager" },
-        { "command": "liftoff.openSidebar" },
-        { "command": "liftoff.spawnAgent" },
-        { "command": "liftoff.killAllAgents" },
-        { "command": "liftoff.continueAgent" },
-        { "command": "liftoff.viewHistory" },
-        { "command": "liftoff.setApiKey" },
-        { "command": "liftoff.buildApp" },
-        { "command": "liftoff.resumeBuild" },
-        { "command": "liftoff.addFeature" },
-        { "command": "liftoff.deployApp" },
-        { "command": "liftoff.generateTests" }
+        {
+          "command": "liftoff.openManager"
+        },
+        {
+          "command": "liftoff.openSidebar"
+        },
+        {
+          "command": "liftoff.spawnAgent"
+        },
+        {
+          "command": "liftoff.killAllAgents"
+        },
+        {
+          "command": "liftoff.continueAgent"
+        },
+        {
+          "command": "liftoff.viewHistory"
+        },
+        {
+          "command": "liftoff.setApiKey"
+        },
+        {
+          "command": "liftoff.buildApp"
+        },
+        {
+          "command": "liftoff.resumeBuild"
+        },
+        {
+          "command": "liftoff.addFeature"
+        },
+        {
+          "command": "liftoff.deployApp"
+        },
+        {
+          "command": "liftoff.generateTests"
+        }
       ]
     },
     "configuration": {
       "title": "Liftoff",
       "properties": {
-        "liftoff.huggingfaceApiKey": {
-          "type": "string",
-          "default": "",
-          "description": "Your HuggingFace API key (Pro recommended for best models)"
-        },
         "liftoff.defaultModel": {
           "type": "string",
           "default": "deepseek-ai/DeepSeek-V3-0324",
@@ -161,18 +184,35 @@
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
     "lint": "eslint src",
-    "lint:fix": "eslint src --fix"
+    "lint:fix": "eslint src --fix",
+    "test": "npm run test:unit",
+    "test:unit": "mocha",
+    "test:integration": "mocha --require ts-node/register 'tests/integration/**/*.test.ts' --timeout 30000",
+    "test:e2e": "playwright test",
+    "test:coverage": "c8 npm run test:unit",
+    "test:watch": "mocha --require ts-node/register 'tests/unit/**/*.test.ts' --watch --watch-files src,tests"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.1",
+    "@playwright/test": "^1.40.0",
+    "@types/chai": "^4.3.11",
     "@types/eslint": "^9.6.1",
+    "@types/mocha": "^10.0.6",
     "@types/node": "^20.10.0",
+    "@types/sinon": "^17.0.2",
+    "@types/uuid": "^10.0.0",
     "@types/vscode": "^1.85.0",
+    "c8": "^9.0.0",
+    "chai": "^4.3.10",
     "eslint": "^9.39.1",
+    "mocha": "^10.2.0",
+    "sinon": "^17.0.1",
+    "ts-node": "^10.9.2",
     "typescript": "^5.3.0",
     "typescript-eslint": "^8.48.0"
   },
   "dependencies": {
-    "playwright": "^1.40.0"
+    "playwright": "^1.40.0",
+    "uuid": "^13.0.0"
   }
 }

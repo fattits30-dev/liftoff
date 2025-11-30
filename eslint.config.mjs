@@ -12,8 +12,8 @@ export default tseslint.config(
             },
         },
         rules: {
-            // Allow unused vars prefixed with underscore
-            '@typescript-eslint/no-unused-vars': ['error', { 
+            // Allow unused vars prefixed with underscore (warn for others during development)
+            '@typescript-eslint/no-unused-vars': ['warn', {
                 argsIgnorePattern: '^_',
                 varsIgnorePattern: '^_',
                 caughtErrorsIgnorePattern: '^_',
@@ -43,6 +43,7 @@ export default tseslint.config(
             'dist/**',
             'node_modules/**',
             'src/_legacy/**',
+            'src/appBuilder/templates/**',
             '**/*.js',
             '**/*.mjs',
         ],

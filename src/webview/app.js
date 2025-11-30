@@ -541,7 +541,12 @@ document.getElementById('chatInput').addEventListener('keydown', e => {
 });
 
 window.addEventListener('message', e => {
+    // SECURITY: Validate message structure to prevent malicious messages
     const msg = e.data;
+    if (!msg || typeof msg !== 'object' || !msg.type) {
+        return; // Ignore invalid messages
+    }
+
     switch (msg.type) {
         case 'orchestratorStart':
             isThinking = true;

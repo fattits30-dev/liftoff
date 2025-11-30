@@ -1,0 +1,18 @@
+# Exclude template files from linting (they're copied to generated projects)
+src/appBuilder/templates/**
+src/appBuilder/templates/**/*
+
+# Test files
+tests/
+*.test.ts
+*.spec.ts
+
+# Build output
+dist/
+out/
+
+# Dependencies
+node_modules/
+
+# Legacy code (to be refactored)
+src/_legacy/

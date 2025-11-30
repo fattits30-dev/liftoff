@@ -3,6 +3,7 @@ import * as fsPromises from 'fs/promises';
 import * as path from 'path';
 import { exec } from 'child_process';
 import { promisify } from 'util';
+import { validatePath } from '../utils/pathValidator';
 
 const execAsync = promisify(exec);
 
@@ -90,7 +91,9 @@ export const TOOLS: Record<string, Tool> = {
                     return { success: false, output: '', error: 'Missing required parameter: path' };
                 }
                 const filePath = path.resolve(workspaceRoot, params.path);
-                
+
+                validatePath(filePath, workspaceRoot);
+
                 if (!isWithinWorkspace(filePath, workspaceRoot)) {
                     return { success: false, output: '', error: 'Path outside workspace not allowed' };
                 }
@@ -98,7 +101,7 @@ export const TOOLS: Record<string, Tool> = {
                 if (!readCheck.allowed) {
                     return { success: false, output: '', error: readCheck.reason };
                 }
-                
+
                 let content = await fsPromises.readFile(filePath, 'utf-8');
                 
                 if (params.lines) {
@@ -135,7 +138,9 @@ export const TOOLS: Record<string, Tool> = {
                     return { success: false, output: '', error: 'Missing required parameter: content' };
                 }
                 const filePath = path.resolve(workspaceRoot, params.path);
-                
+
+                validatePath(filePath, workspaceRoot);
+
                 if (!isWithinWorkspace(filePath, workspaceRoot)) {
                     return { success: false, output: '', error: 'Path outside workspace not allowed' };
                 }
@@ -143,12 +148,13 @@ export const TOOLS: Record<string, Tool> = {
                 if (!writeCheck.allowed) {
                     return { success: false, output: '', error: writeCheck.reason };
                 }
-                
+
                 const dir = path.dirname(filePath);
                 if (!await fileExists(dir)) {
+                    validatePath(dir, workspaceRoot);
                     await fsPromises.mkdir(dir, { recursive: true });
                 }
-                
+
                 await fsPromises.writeFile(filePath, params.content, 'utf-8');
                 return { success: true, output: `Written to ${params.path}` };
             } catch (e: any) {
@@ -171,7 +177,9 @@ export const TOOLS: Record<string, Tool> = {
                     return { success: false, output: '', error: 'Missing required parameters' };
                 }
                 const filePath = path.resolve(workspaceRoot, params.path);
-                
+
+                validatePath(filePath, workspaceRoot);
+
                 if (!isWithinWorkspace(filePath, workspaceRoot)) {
                     return { success: false, output: '', error: 'Path outside workspace not allowed' };
                 }
@@ -179,7 +187,7 @@ export const TOOLS: Record<string, Tool> = {
                 if (!writeCheck.allowed) {
                     return { success: false, output: '', error: writeCheck.reason };
                 }
-                
+
                 const content = await fsPromises.readFile(filePath, 'utf-8');
                 
                 if (!content.includes(params.search)) {
@@ -206,11 +214,13 @@ export const TOOLS: Record<string, Tool> = {
         async execute(params, workspaceRoot) {
             try {
                 const dirPath = path.resolve(workspaceRoot, params.path || '.');
-                
+
+                validatePath(dirPath, workspaceRoot);
+
                 if (!isWithinWorkspace(dirPath, workspaceRoot)) {
                     return { success: false, output: '', error: 'Path outside workspace not allowed' };
                 }
-                
+
                 const entries = await fsPromises.readdir(dirPath, { withFileTypes: true });
                 const lines: string[] = [];
                 
@@ -290,57 +300,58 @@ export const TOOLS: Record<string, Tool> = {
             filePattern: { type: 'string', description: 'File glob pattern (e.g., "*.ts")' }
         },
         async execute(params, workspaceRoot) {
+            const walkDir = async (dir: string, depth: number, regex: RegExp, filePattern: string | undefined, results: string[]): Promise<void> => {
+                if (depth > 5) return;
+
+                try {
+                    const entries = await fsPromises.readdir(dir, { withFileTypes: true });
+
+                    for (const entry of entries) {
+                        if (entry.name.startsWith('.') || entry.name === 'node_modules') continue;
+
+                        const fullPath = path.join(dir, entry.name);
+
+                        if (entry.isDirectory()) {
+                            await walkDir(fullPath, depth + 1, regex, filePattern, results);
+                        } else if (entry.isFile()) {
+                            if (filePattern && !entry.name.match(filePattern.replace('*', '.*'))) continue;
+
+                            try {
+                                const content = await fsPromises.readFile(fullPath, 'utf-8');
+                                const lines = content.split('\n');
+
+                                lines.forEach((line, i) => {
+                                    if (regex.test(line)) {
+                                        const relPath = path.relative(workspaceRoot, fullPath);
+                                        results.push(`${relPath}:${i + 1}: ${line.trim().substring(0, 100)}`);
+                                    }
+                                });
+                            } catch { /* skip binary files */ }
+                        }
+                    }
+                } catch { /* ignore permission errors */ }
+            };
+
             try {
                 if (!params.pattern) {
                     return { success: false, output: '', error: 'Missing required parameter: pattern' };
                 }
-                
+
                 const searchDir = path.resolve(workspaceRoot, params.path || '.');
+                validatePath(searchDir, workspaceRoot);
                 if (!isWithinWorkspace(searchDir, workspaceRoot)) {
                     return { success: false, output: '', error: 'Path outside workspace not allowed' };
                 }
-                
+
                 const results: string[] = [];
                 const regex = new RegExp(params.pattern, 'gi');
-                
-                async function walkDir(dir: string, depth: number = 0): Promise<void> {
-                    if (depth > 5) return;
-                    
-                    try {
-                        const entries = await fsPromises.readdir(dir, { withFileTypes: true });
-                        
-                        for (const entry of entries) {
-                            if (entry.name.startsWith('.') || entry.name === 'node_modules') continue;
-                            
-                            const fullPath = path.join(dir, entry.name);
-                            
-                            if (entry.isDirectory()) {
-                                await walkDir(fullPath, depth + 1);
-                            } else if (entry.isFile()) {
-                                if (params.filePattern && !entry.name.match(params.filePattern.replace('*', '.*'))) continue;
-                                
-                                try {
-                                    const content = await fsPromises.readFile(fullPath, 'utf-8');
-                                    const lines = content.split('\n');
-                                    
-                                    lines.forEach((line, i) => {
-                                        if (regex.test(line)) {
-                                            const relPath = path.relative(workspaceRoot, fullPath);
-                                            results.push(`${relPath}:${i + 1}: ${line.trim().substring(0, 100)}`);
-                                        }
-                                    });
-                                } catch { /* skip binary files */ }
-                            }
-                        }
-                    } catch { /* ignore permission errors */ }
-                }
-                
-                await walkDir(searchDir);;
-                
+
+                await walkDir(searchDir, 0, regex, params.filePattern, results);
+
                 if (results.length === 0) {
                     return { success: true, output: 'No matches found' };
                 }
-                
+
                 return { success: true, output: results.slice(0, 50).join('\n') + (results.length > 50 ? `\n... (${results.length - 50} more)` : '') };
             } catch (e: any) {
                 return { success: false, output: '', error: e.message };
@@ -360,7 +371,9 @@ export const TOOLS: Record<string, Tool> = {
                     return { success: false, output: '', error: 'Missing required parameter: path' };
                 }
                 const filePath = path.resolve(workspaceRoot, params.path);
-                
+
+                validatePath(filePath, workspaceRoot);
+
                 if (!isWithinWorkspace(filePath, workspaceRoot)) {
                     return { success: false, output: '', error: 'Path outside workspace not allowed' };
                 }
@@ -368,7 +381,7 @@ export const TOOLS: Record<string, Tool> = {
                 if (!writeCheck.allowed) {
                     return { success: false, output: '', error: writeCheck.reason };
                 }
-                
+
                 await fsPromises.unlink(filePath);
                 return { success: true, output: `Deleted ${params.path}` };
             } catch (e: any) {

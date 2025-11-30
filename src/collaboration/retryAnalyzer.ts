@@ -347,7 +347,7 @@ Consider:
     /**
      * Decompose a complex task into subtasks
      */
-    decomposeTask(task: string, context?: string): TaskDecomposition {
+    decomposeTask(task: string, _context?: string): TaskDecomposition {
         // Simple heuristic-based decomposition
         const subtasks: TaskDecomposition['subtasks'] = [];
 

@@ -101,18 +101,93 @@ export async function activate(context: vscode.ExtensionContext) {
                 placeHolder: 'hf_...'
             });
             if (apiKey) {
+                // SECURITY: Store in SecretStorage (encrypted), not plaintext settings
+                await context.secrets.store('liftoff.hfApiKey', apiKey);
+
+                // Remove from old insecure location if present
+                const config = vscode.workspace.getConfiguration('liftoff');
+                await config.update('huggingfaceApiKey', undefined, vscode.ConfigurationTarget.Global);
+
                 agentManager.setApiKey(apiKey);
-                orchestrator.setApiKey(apiKey);
+                await orchestrator.setApiKey(apiKey);
                 const ok = await agentManager.testConnection();
                 vscode.window.showInformationMessage(
                     ok ? '✅ API key verified!' : '⚠️ Key set but connection test failed'
                 );
             }
         }),
-        
+
+        vscode.commands.registerCommand('liftoff.testMcpTools', async () => {
+            const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || process.cwd();
+            const output = vscode.window.createOutputChannel('MCP Tools Test');
+            output.show();
+
+            try {
+                output.appendLine('=== MCP Tools Test ===\n');
+
+                // Import MCP router
+                const { getMcpRouter } = await import('./mcp');
+                const mcpRouter = getMcpRouter();
+
+                // Load configuration
+                output.appendLine('1. Loading MCP configuration from .mcp.json...');
+                const configs = await mcpRouter.loadConfig(workspaceRoot);
+                output.appendLine(`   ✓ Found ${configs.length} MCP servers configured\n`);
+
+                if (configs.length === 0) {
+                    output.appendLine('   ✗ ERROR: No MCP servers configured in .mcp.json');
+                    vscode.window.showErrorMessage('No MCP servers found in .mcp.json');
+                    return;
+                }
+
+                // Connect to servers
+                output.appendLine('2. Connecting to MCP servers...');
+                await mcpRouter.connectAll(configs);
+                output.appendLine('   ✓ Connected to all servers\n');
+
+                // List available tools
+                output.appendLine('3. Available tools:');
+                const toolsDescription = mcpRouter.getToolsCompact();
+                if (toolsDescription) {
+                    const toolLines = toolsDescription.split('\n');
+                    output.appendLine(`   ✓ Found ${toolLines.length} tools:`);
+                    toolLines.slice(0, 10).forEach(line => {
+                        output.appendLine(`     - ${line}`);
+                    });
+                    if (toolLines.length > 10) {
+                        output.appendLine(`     ... and ${toolLines.length - 10} more\n`);
+                    }
+                } else {
+                    output.appendLine('   ✗ No tools found\n');
+                }
+
+                // Test context7 tool
+                output.appendLine('4. Testing context7 tool (resolve-library-id)...');
+                try {
+                    const result = await mcpRouter.callTool('resolve-library-id', { library: 'react' });
+                    if (result.success) {
+                        output.appendLine('   ✓ SUCCESS: Tool executed successfully');
+                        output.appendLine(`   Result: ${result.output.substring(0, 200)}...\n`);
+                        vscode.window.showInformationMessage('✅ MCP tools are working!');
+                    } else {
+                        output.appendLine(`   ✗ FAILED: ${result.error}\n`);
+                        vscode.window.showErrorMessage(`MCP tool failed: ${result.error}`);
+                    }
+                } catch (err: any) {
+                    output.appendLine(`   ✗ EXCEPTION: ${err.message}\n`);
+                    vscode.window.showErrorMessage(`MCP test error: ${err.message}`);
+                }
+
+            } catch (err: any) {
+                output.appendLine(`\n✗ FATAL ERROR: ${err.message}`);
+                output.appendLine(`Stack: ${err.stack}`);
+                vscode.window.showErrorMessage(`MCP test failed: ${err.message}`);
+            }
+        }),
+
         vscode.commands.registerCommand('liftoff.spawnAgent', async () => {
-            const config = vscode.workspace.getConfiguration('liftoff');
-            if (!config.get<string>('huggingfaceApiKey')) {
+            const hasApiKey = await context.secrets.get('liftoff.hfApiKey');
+            if (!hasApiKey) {
                 const action = await vscode.window.showErrorMessage('HuggingFace API key not set!', 'Set Key');
                 if (action) vscode.commands.executeCommand('liftoff.setApiKey');
                 return;
@@ -259,8 +334,8 @@ export async function activate(context: vscode.ExtensionContext) {
         }),
 
         vscode.commands.registerCommand('liftoff.orchestratorChat', async () => {
-            const config = vscode.workspace.getConfiguration('liftoff');
-            if (!config.get<string>('huggingfaceApiKey')) {
+            const hasApiKey = await context.secrets.get('liftoff.hfApiKey');
+            if (!hasApiKey) {
                 const action = await vscode.window.showErrorMessage(
                     'HuggingFace API key not set!', 'Set Key'
                 );
@@ -303,8 +378,8 @@ export async function activate(context: vscode.ExtensionContext) {
 
         // App Builder Commands
         vscode.commands.registerCommand('liftoff.buildApp', async () => {
-            const config = vscode.workspace.getConfiguration('liftoff');
-            if (!config.get<string>('huggingfaceApiKey')) {
+            const hasApiKey = await context.secrets.get('liftoff.hfApiKey');
+            if (!hasApiKey) {
                 const action = await vscode.window.showErrorMessage(
                     'HuggingFace API key not set!', 'Set Key'
                 );
@@ -646,17 +721,33 @@ This includes:
         })
     );
     
-    // Apply API key from config if present
-    const config = vscode.workspace.getConfiguration('liftoff');
-    if (!config.get<string>('huggingfaceApiKey')) {
+    // SECURITY: Retrieve API key from encrypted SecretStorage
+    let apiKey = await context.secrets.get('liftoff.hfApiKey');
+
+    // Migration: Check old insecure location and move to SecretStorage
+    if (!apiKey) {
+        const config = vscode.workspace.getConfiguration('liftoff');
+        const oldKey = config.get<string>('huggingfaceApiKey');
+        if (oldKey) {
+            log('Migrating API key from insecure settings to encrypted SecretStorage');
+            await context.secrets.store('liftoff.hfApiKey', oldKey);
+            await config.update('huggingfaceApiKey', undefined, vscode.ConfigurationTarget.Global);
+            apiKey = oldKey;
+            vscode.window.showInformationMessage(
+                '🔒 Security: API key migrated to encrypted storage'
+            );
+        }
+    }
+
+    // Apply API key if present
+    if (!apiKey) {
         vscode.window.showInformationMessage(
             '🚀 Liftoff ready! Set your HuggingFace API key to start.',
             'Set Key'
         ).then(a => { if (a) vscode.commands.executeCommand('liftoff.setApiKey'); });
     } else {
-        const apiKey = config.get<string>('huggingfaceApiKey')!;
         agentManager.setApiKey(apiKey);
-        orchestrator.setApiKey(apiKey);
+        await orchestrator.setApiKey(apiKey);
     }
     
     context.subscriptions.push(statusBarItem, agentManager, orchestrator, appBuilder);

@@ -1,0 +1,108 @@
+name: 🐛 Bug Report
+description: Report a bug in the Liftoff extension
+title: "[Bug]: "
+labels: ["bug", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report a bug! Please fill out the form below.
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Bug Description
+      description: A clear and concise description of what the bug is
+      placeholder: When I try to build an app with auth, the extension crashes...
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to Reproduce
+      description: Steps to reproduce the behavior
+      placeholder: |
+        1. Open VS Code
+        2. Run 'Liftoff: Build App'
+        3. Enter description: "A blog with user authentication"
+        4. See error
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected Behavior
+      description: What you expected to happen
+      placeholder: The app should be scaffolded with Supabase auth setup
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual Behavior
+      description: What actually happened
+      placeholder: Extension throws error "Cannot read property 'auth' of undefined"
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Error Logs
+      description: Paste any error messages from the Output panel (View → Output → Liftoff)
+      render: shell
+      placeholder: |
+        [ERROR] Failed to scaffold auth
+        TypeError: Cannot read property 'auth' of undefined
+          at Scaffolder.createAuthFiles (scaffolder.ts:234)
+
+  - type: input
+    id: version
+    attributes:
+      label: Extension Version
+      description: What version of Liftoff are you using? (See Extensions panel)
+      placeholder: "0.1.0"
+    validations:
+      required: true
+
+  - type: input
+    id: vscode-version
+    attributes:
+      label: VS Code Version
+      description: Help → About (e.g., 1.85.0)
+      placeholder: "1.85.0"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating System
+      options:
+        - Windows
+        - macOS
+        - Linux
+    validations:
+      required: true
+
+  - type: textarea
+    id: additional
+    attributes:
+      label: Additional Context
+      description: Any other context about the problem (screenshots, config files, etc.)
+      placeholder: I'm using a corporate proxy...
+
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: Pre-submission Checklist
+      options:
+        - label: I have searched existing issues to ensure this isn't a duplicate
+          required: true
+        - label: I have included error logs from the Output panel
+          required: false
+        - label: I have tested with the latest version of the extension
+          required: false

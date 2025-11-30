@@ -23,7 +23,7 @@
 import * as fs from 'fs';
 import * as fsPromises from 'fs/promises';
 import * as nodePath from 'path';
-import { execSync, spawn } from 'child_process';
+import { execSync, spawn, spawnSync } from 'child_process';
 import * as vm from 'vm';
 import * as vscode from 'vscode';
 import { SafetyGuardrails } from '../safety/guardrails';
@@ -593,27 +593,41 @@ function createSandbox(workspaceRoot: string, browserManager: BrowserManager, gu
                 const cwd = options?.cwd
                     ? validatePath(options.cwd, workspaceRoot, 'read')
                     : workspaceRoot;
+
+                // SECURITY FIX: Parse command into args and use spawnSync without shell
+                // This prevents command injection attacks
+                const args = command.match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g) || [];
+                if (args.length === 0) {
+                    throw new Error('Empty command');
+                }
+
+                const program = args[0]!.replace(/^["']|["']$/g, ''); // Remove quotes from program (! safe: length checked)
+                const programArgs = args.slice(1).map(arg => arg.replace(/^["']|["']$/g, '')); // Remove quotes from args
+
                 try {
-                    return execSync(command, {
+                    const result = spawnSync(program, programArgs, {
                         cwd,
                         timeout: options?.timeout || 120000,
                         encoding: 'utf-8',
                         stdio: ['pipe', 'pipe', 'pipe'],
-                        maxBuffer: 10 * 1024 * 1024 // 10MB
-                    }).toString();
+                        maxBuffer: 10 * 1024 * 1024, // 10MB
+                        shell: false  // CRITICAL: Prevents command injection
+                    });
+
+                    if (result.error) {
+                        throw result.error;
+                    }
+
+                    // Combine stdout and stderr
+                    const output = (result.stdout || '') + (result.stderr || '');
+
+                    if (result.status !== 0 && result.status !== null) {
+                        return `[EXIT CODE: ${result.status}]\n${output}`;
+                    }
+
+                    return output;
                 } catch (err: any) {
-                    // Command failed (non-zero exit code) - combine stdout + stderr + exit info
-                    const stdout = err.stdout?.toString() || '';
-                    const stderr = err.stderr?.toString() || '';
-                    const exitCode = err.status ?? 'unknown';
-
-                    // Return combined output with clear failure indication
-                    let output = '';
-                    if (stdout) output += stdout;
-                    if (stderr) output += (output ? '\n' : '') + stderr;
-                    if (!output) output = err.message;
-
-                    return `[EXIT CODE: ${exitCode}]\n${output}`;
+                    throw new Error(`Command failed: ${err.message}`);
                 }
             },
 
@@ -623,14 +637,26 @@ function createSandbox(workspaceRoot: string, browserManager: BrowserManager, gu
                 if (!cmdCheck.allowed) {
                     return Promise.reject(new Error(`Dangerous command blocked: ${cmdCheck.reason}`));
                 }
-                
-                return new Promise((resolve) => {
-                    const proc = spawn(command, { shell: true, cwd: workspaceRoot });
+
+                // SECURITY FIX: Parse command into args and use spawn without shell
+                const args = command.match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g) || [];
+                if (args.length === 0) {
+                    return Promise.reject(new Error('Empty command'));
+                }
+
+                const program = args[0]!.replace(/^["']|["']$/g, ''); // ! safe: length checked
+                const programArgs = args.slice(1).map(arg => arg.replace(/^["']|["']$/g, ''));
+
+                return new Promise((resolve, reject) => {
+                    const proc = spawn(program, programArgs, {
+                        cwd: workspaceRoot,
+                        shell: false  // CRITICAL: Prevents command injection
+                    });
                     let output = '';
                     proc.stdout?.on('data', d => output += d);
                     proc.stderr?.on('data', d => output += d);
                     proc.on('close', () => resolve(output));
-                    proc.on('error', (err) => resolve(`Error: ${err.message}`));
+                    proc.on('error', (err) => reject(new Error(`Command failed: ${err.message}`)));
                 });
             }
         },
@@ -639,7 +665,12 @@ function createSandbox(workspaceRoot: string, browserManager: BrowserManager, gu
         git: {
             status: (): string => {
                 try {
-                    return execSync('git status --short', { cwd: workspaceRoot, encoding: 'utf-8' });
+                    const result = spawnSync('git', ['status', '--short'], {
+                        cwd: workspaceRoot,
+                        encoding: 'utf-8',
+                        shell: false
+                    });
+                    return result.stdout || result.stderr || '';
                 } catch (err: any) {
                     return err.message;
                 }
@@ -647,8 +678,14 @@ function createSandbox(workspaceRoot: string, browserManager: BrowserManager, gu
 
             diff: (file?: string): string => {
                 try {
-                    const cmd = file ? `git diff -- "${file}"` : 'git diff';
-                    return execSync(cmd, { cwd: workspaceRoot, encoding: 'utf-8' });
+                    // SECURITY FIX: Use spawn args array to prevent injection in file parameter
+                    const args = file ? ['diff', '--', file] : ['diff'];
+                    const result = spawnSync('git', args, {
+                        cwd: workspaceRoot,
+                        encoding: 'utf-8',
+                        shell: false
+                    });
+                    return result.stdout || result.stderr || '';
                 } catch (err: any) {
                     return err.message;
                 }
@@ -656,7 +693,12 @@ function createSandbox(workspaceRoot: string, browserManager: BrowserManager, gu
 
             log: (n: number = 5): string => {
                 try {
-                    return execSync(`git log -${n} --oneline`, { cwd: workspaceRoot, encoding: 'utf-8' });
+                    const result = spawnSync('git', ['log', `-${n}`, '--oneline'], {
+                        cwd: workspaceRoot,
+                        encoding: 'utf-8',
+                        shell: false
+                    });
+                    return result.stdout || result.stderr || '';
                 } catch (err: any) {
                     return err.message;
                 }
@@ -664,11 +706,18 @@ function createSandbox(workspaceRoot: string, browserManager: BrowserManager, gu
 
             commit: (message: string): string => {
                 try {
-                    execSync('git add -A', { cwd: workspaceRoot });
-                    return execSync(`git commit -m "${message.replace(/"/g, '\\"')}"`, {
+                    // SECURITY FIX: Use spawn args array to prevent injection in commit message
+                    spawnSync('git', ['add', '-A'], {
                         cwd: workspaceRoot,
-                        encoding: 'utf-8'
+                        shell: false
                     });
+
+                    const result = spawnSync('git', ['commit', '-m', message], {
+                        cwd: workspaceRoot,
+                        encoding: 'utf-8',
+                        shell: false
+                    });
+                    return result.stdout || result.stderr || '';
                 } catch (err: any) {
                     return err.message;
                 }
@@ -676,7 +725,12 @@ function createSandbox(workspaceRoot: string, browserManager: BrowserManager, gu
 
             branch: (): string => {
                 try {
-                    return execSync('git branch --show-current', { cwd: workspaceRoot, encoding: 'utf-8' }).trim();
+                    const result = spawnSync('git', ['branch', '--show-current'], {
+                        cwd: workspaceRoot,
+                        encoding: 'utf-8',
+                        shell: false
+                    });
+                    return (result.stdout || '').trim();
                 } catch (err: any) {
                     return err.message;
                 }
@@ -684,7 +738,13 @@ function createSandbox(workspaceRoot: string, browserManager: BrowserManager, gu
 
             checkout: (branch: string): string => {
                 try {
-                    return execSync(`git checkout ${branch}`, { cwd: workspaceRoot, encoding: 'utf-8' });
+                    // SECURITY FIX: Use spawn args array to prevent injection in branch parameter
+                    const result = spawnSync('git', ['checkout', branch], {
+                        cwd: workspaceRoot,
+                        encoding: 'utf-8',
+                        shell: false
+                    });
+                    return result.stdout || result.stderr || '';
                 } catch (err: any) {
                     return err.message;
                 }
@@ -1070,160 +1130,23 @@ export class UnifiedExecutor {
      * Execute code in the sandboxed context
      */
     async execute(code: string, timeout?: number): Promise<ExecutionResult> {
-        const startTime = Date.now();
-        const effectiveTimeout = timeout || this.defaultTimeout;
+        // SECURITY: VM sandbox disabled due to CRITICAL vulnerability (CVE-pending)
+        // The vm.runInContext() implementation is vulnerable to constructor escape attacks
+        // that allow arbitrary code execution, bypassing all sandboxing.
+        //
+        // Attack vector: constructor.constructor('malicious code')()
+        // This allows malicious prompts to execute any Node.js code with full file system access.
+        //
+        // ALTERNATIVE: Use shell.run() for safe command execution instead.
+        // Agents have access to all necessary tools without needing JavaScript execution.
+        //
+        // TODO: Implement secure alternative using isolated V8 contexts or WebAssembly sandbox
 
-        // Initialize execution stats tracker
-        const stats: ExecutionStats = {
-            fileChanges: [],
-            lastScreenshot: null
-        };
-
-        try {
-            const sandbox = createSandbox(this.workspaceRoot, this.browserManager, this.guardrails, stats);
-
-            // Auto-add await to common async calls that agents often forget
-            // This makes the API more forgiving for LLM-generated code
-            let processedCode = code;
-            
-            // Pattern: variable = fs.read/write/etc without await
-            // Match: const/let/var name = fs.method( or shell.method( etc.
-            const asyncPatterns = [
-                /\b(const|let|var)\s+(\w+)\s*=\s*(fs\.(read|write|writeForce|exists|list|search|delete|mkdir|readHome))\s*\(/g,
-                /\b(const|let|var)\s+(\w+)\s*=\s*(shell\.(run|runAsync))\s*\(/g,
-                /\b(const|let|var)\s+(\w+)\s*=\s*(git\.(status|diff|log|commit|branch|checkout))\s*\(/g,
-                /\b(const|let|var)\s+(\w+)\s*=\s*(test\.(discover|run|runFile))\s*\(/g,
-                /\b(const|let|var)\s+(\w+)\s*=\s*(browser\.(navigate|click|type|screenshot|getText|getElements|waitFor|close))\s*\(/g,
-                /\b(const|let|var)\s+(\w+)\s*=\s*(db\.(detect|prisma|migrate|generate|studio|query))\s*\(/g,
-                /\b(const|let|var)\s+(\w+)\s*=\s*(deploy\.(dockerfile|compose|vercelConfig|vercel|dockerBuild|dockerRun|composeUp|composeDown))\s*\(/g,
-                /\b(const|let|var)\s+(\w+)\s*=\s*(env\.(template|missing|create|set|generateExample))\s*\(/g,
-                /\b(const|let|var)\s+(\w+)\s*=\s*(github\.\w+)\s*\(/g,
-                /\b(const|let|var)\s+(\w+)\s*=\s*(cicd\.\w+)\s*\(/g,
-                /\b(const|let|var)\s+(\w+)\s*=\s*(project\.(detect|scaffold|guide))\s*\(/g,
-                /\b(const|let|var)\s+(\w+)\s*=\s*(fetch)\s*\(/g,
-            ];
-
-            for (const pattern of asyncPatterns) {
-                // Only add await if it's not already there
-                processedCode = processedCode.replace(pattern, (match, declType, varName, funcCall) => {
-                    // Check if await is already present before this match
-                    const beforeMatch = processedCode.substring(0, processedCode.indexOf(match));
-                    const lastLine = beforeMatch.split('\n').pop() || '';
-                    if (lastLine.includes('await')) {
-                        return match; // Already has await
-                    }
-                    return `${declType} ${varName} = await ${funcCall}(`;
-                });
-            }
-
-            // Also handle return statements: return fs.read() -> return await fs.read()
-            const returnPatterns = [
-                /\breturn\s+(fs\.\w+)\s*\(/g,
-                /\breturn\s+(shell\.\w+)\s*\(/g,
-                /\breturn\s+(git\.\w+)\s*\(/g,
-                /\breturn\s+(test\.\w+)\s*\(/g,
-                /\breturn\s+(browser\.\w+)\s*\(/g,
-                /\breturn\s+(db\.\w+)\s*\(/g,
-                /\breturn\s+(deploy\.\w+)\s*\(/g,
-                /\breturn\s+(env\.\w+)\s*\(/g,
-                /\breturn\s+(github\.\w+)\s*\(/g,
-                /\breturn\s+(cicd\.\w+)\s*\(/g,
-                /\breturn\s+(project\.\w+)\s*\(/g,
-                /\breturn\s+(fetch)\s*\(/g,
-            ];
-
-            for (const pattern of returnPatterns) {
-                processedCode = processedCode.replace(pattern, (match, funcCall) => {
-                    if (match.includes('await')) return match;
-                    return `return await ${funcCall}(`;
-                });
-            }
-
-            // Handle chained calls: fs.list('.').filter(...) -> (await fs.list('.')).filter(...)
-            // Match: asyncFunc(...).method( where asyncFunc is one of our async APIs
-            const chainedPatterns = [
-                // fs.list('.').filter() -> (await fs.list('.')).filter()
-                /(?<!await\s)(?<!\(await\s)(fs\.(read|list|search|exists))\s*\(([^)]*)\)\s*\./g,
-                /(?<!await\s)(?<!\(await\s)(shell\.(run|runAsync))\s*\(([^)]*)\)\s*\./g,
-                /(?<!await\s)(?<!\(await\s)(git\.(status|diff|log|branch))\s*\(([^)]*)\)\s*\./g,
-                /(?<!await\s)(?<!\(await\s)(test\.(discover|run|runFile))\s*\(([^)]*)\)\s*\./g,
-                /(?<!await\s)(?<!\(await\s)(github\.\w+)\s*\(([^)]*)\)\s*\./g,
-                /(?<!await\s)(?<!\(await\s)(project\.(detect|templates))\s*\(([^)]*)\)\s*\./g,
-            ];
-
-            for (const pattern of chainedPatterns) {
-                processedCode = processedCode.replace(pattern, (match, funcCall, _method, args) => {
-                    // Wrap in (await ...).
-                    return `(await ${funcCall}(${args || ''})).`;
-                });
-            }
-
-            // Wrap code to handle both sync and async, with explicit return
-            const wrappedCode = `
-                (async () => {
-                    ${processedCode}
-                })()
-            `;
-
-            // Create VM context with safe globals
-            const vmContext = vm.createContext({
-                ...sandbox,
-                setTimeout,
-                setInterval,
-                clearTimeout,
-                clearInterval,
-                Promise,
-                Array,
-                Object,
-                String,
-                Number,
-                Boolean,
-                Date,
-                Math,
-                RegExp,
-                Error,
-                Map,
-                Set,
-                // Helpful error messages for common Node.js APIs that aren't available
-                require: () => { throw new Error('require() is not available. Use the sandbox APIs: fs.read(), fs.write(), shell.run(), etc.'); },
-                process: { 
-                    cwd: () => sandbox.workspace.root,
-                    env: {},  // Empty for security
-                },
-                // Common fs method aliases that redirect to sandbox.fs with helpful errors
-                __dirname: sandbox.workspace.root,
-                __filename: 'execute.js',
-            });
-
-            // Execute with timeout
-            const script = new vm.Script(wrappedCode, { filename: 'execute.js' });
-            const result = await script.runInContext(vmContext, {
-                timeout: effectiveTimeout
-            });
-
-            // Aggregate stats from all file changes
-            const totalAdded = stats.fileChanges.reduce((sum, f) => sum + f.linesAdded, 0);
-            const totalRemoved = stats.fileChanges.reduce((sum, f) => sum + f.linesRemoved, 0);
-            const lastFilePath = stats.fileChanges.length > 0 
-                ? stats.fileChanges[stats.fileChanges.length - 1].filePath 
-                : undefined;
-
-            return {
-                success: true,
-                result: result,
-                duration: Date.now() - startTime,
-                linesAdded: totalAdded,
-                linesRemoved: totalRemoved,
-                filePath: lastFilePath,
-                screenshot: stats.lastScreenshot || undefined
-            };
-        } catch (err: any) {
-            return {
-                success: false,
-                error: err.message,
-                duration: Date.now() - startTime
-            };
-        }
+        throw new Error(
+            'Code execution disabled due to security vulnerability. ' +
+            'VM sandbox is bypassable via constructor escape attacks. ' +
+            'Use shell.run() for command execution instead.'
+        );
     }
 
     /**

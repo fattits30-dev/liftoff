@@ -1,21 +1,45 @@
 // Git tools for version control operations
 import { Tool } from './index';
-import { exec } from 'child_process';
-import { promisify } from 'util';
+import { spawn } from 'child_process';
 
-const execAsync = promisify(exec);
-
-async function runGit(args: string, cwd: string): Promise<{ success: boolean; output: string; error?: string }> {
-    try {
-        const { stdout, stderr } = await execAsync(`git ${args}`, { 
-            cwd, 
-            maxBuffer: 1024 * 1024 * 5,
+// SECURITY FIX: Use spawn with args array instead of exec with string
+async function runGit(args: string[], cwd: string): Promise<{ success: boolean; output: string; error?: string }> {
+    return new Promise((resolve) => {
+        const proc = spawn('git', args, {
+            cwd,
+            shell: false,  // CRITICAL: Prevents command injection
             timeout: 30000
         });
-        return { success: true, output: stdout.trim() + (stderr ? `\n${stderr.trim()}` : '') };
-    } catch (e: any) {
-        return { success: false, output: e.stdout || '', error: e.stderr || e.message };
-    }
+
+        let stdout = '';
+        let stderr = '';
+
+        proc.stdout?.on('data', (data) => stdout += data);
+        proc.stderr?.on('data', (data) => stderr += data);
+
+        proc.on('close', (code) => {
+            if (code === 0) {
+                resolve({
+                    success: true,
+                    output: stdout.trim() + (stderr ? `\n${stderr.trim()}` : '')
+                });
+            } else {
+                resolve({
+                    success: false,
+                    output: stdout || '',
+                    error: stderr || 'Git command failed'
+                });
+            }
+        });
+
+        proc.on('error', (err) => {
+            resolve({
+                success: false,
+                output: '',
+                error: err.message
+            });
+        });
+    });
 }
 
 export const GIT_TOOLS: Record<string, Tool> = {
@@ -24,23 +48,23 @@ export const GIT_TOOLS: Record<string, Tool> = {
         description: 'Get current git status - shows modified, staged, and untracked files',
         parameters: {},
         async execute(params, workspaceRoot) {
-            const result = await runGit('status --porcelain', workspaceRoot);
+            const result = await runGit(['status', '--porcelain'], workspaceRoot);
             if (!result.success) return { success: false, output: '', error: result.error };
-            
+
             if (!result.output.trim()) {
                 return { success: true, output: 'Working directory clean - no changes' };
             }
-            
+
             const lines = result.output.split('\n').filter(l => l.trim());
             const modified = lines.filter(l => l.startsWith(' M') || l.startsWith('M ')).map(l => l.slice(3));
             const added = lines.filter(l => l.startsWith('A ') || l.startsWith('??')).map(l => l.slice(3));
             const deleted = lines.filter(l => l.startsWith(' D') || l.startsWith('D ')).map(l => l.slice(3));
-            
+
             let output = `Git Status:\n`;
             if (modified.length) output += `\nModified (${modified.length}):\n  ${modified.join('\n  ')}`;
             if (added.length) output += `\nNew/Untracked (${added.length}):\n  ${added.join('\n  ')}`;
             if (deleted.length) output += `\nDeleted (${deleted.length}):\n  ${deleted.join('\n  ')}`;
-            
+
             return { success: true, output };
         }
     },
@@ -53,20 +77,26 @@ export const GIT_TOOLS: Record<string, Tool> = {
             staged: { type: 'boolean', description: 'Show staged changes instead of unstaged' }
         },
         async execute(params, workspaceRoot) {
-            const staged = params.staged ? '--staged' : '';
-            const file = params.file || '';
-            const result = await runGit(`diff ${staged} ${file}`.trim(), workspaceRoot);
-            
+            // SECURITY FIX: Build args array to prevent injection in file parameter
+            const args = ['diff'];
+            if (params.staged) args.push('--staged');
+            if (params.file) {
+                args.push('--');
+                args.push(params.file);
+            }
+
+            const result = await runGit(args, workspaceRoot);
+
             if (!result.success) return { success: false, output: '', error: result.error };
             if (!result.output.trim()) {
                 return { success: true, output: 'No changes to show' };
             }
-            
+
             // Truncate if too long
-            const output = result.output.length > 5000 
+            const output = result.output.length > 5000
                 ? result.output.substring(0, 5000) + '\n... (truncated)'
                 : result.output;
-            
+
             return { success: true, output };
         }
     },
@@ -79,22 +109,24 @@ export const GIT_TOOLS: Record<string, Tool> = {
             files: { type: 'string', description: 'Specific files to commit (space-separated), or empty for all' }
         },
         async execute(params, workspaceRoot) {
+            // SECURITY FIX: Use args array to prevent injection
             // Stage files
             const files = params.files || '.';
-            const addResult = await runGit(`add ${files}`, workspaceRoot);
+            const addArgs = ['add', files];
+            const addResult = await runGit(addArgs, workspaceRoot);
             if (!addResult.success) return { success: false, output: '', error: addResult.error };
-            
-            // Commit
-            const message = params.message.replace(/"/g, '\\"');
-            const commitResult = await runGit(`commit -m "${message}"`, workspaceRoot);
-            
+
+            // Commit - message passed as separate argument (no escaping needed!)
+            const commitArgs = ['commit', '-m', params.message];
+            const commitResult = await runGit(commitArgs, workspaceRoot);
+
             if (!commitResult.success) {
                 if (commitResult.error?.includes('nothing to commit')) {
                     return { success: true, output: 'Nothing to commit - working directory clean' };
                 }
                 return { success: false, output: '', error: commitResult.error };
             }
-            
+
             return { success: true, output: `Committed: ${params.message}\n${commitResult.output}` };
         }
     },
@@ -108,23 +140,23 @@ export const GIT_TOOLS: Record<string, Tool> = {
         },
         async execute(params, workspaceRoot) {
             if (params.mode === 'soft') {
-                const result = await runGit('reset --soft HEAD~1', workspaceRoot);
+                const result = await runGit(['reset', '--soft', 'HEAD~1'], workspaceRoot);
                 if (!result.success) return { success: false, output: '', error: result.error };
                 return { success: true, output: 'Undid last commit. Changes are now unstaged.' };
             }
-            
+
             if (params.mode === 'hard') {
-                const result = await runGit('checkout -- .', workspaceRoot);
+                const result = await runGit(['checkout', '--', '.'], workspaceRoot);
                 if (!result.success) return { success: false, output: '', error: result.error };
                 return { success: true, output: 'Discarded all uncommitted changes.' };
             }
-            
+
             if (params.mode === 'file' && params.file) {
-                const result = await runGit(`checkout -- "${params.file}"`, workspaceRoot);
+                const result = await runGit(['checkout', '--', params.file], workspaceRoot);
                 if (!result.success) return { success: false, output: '', error: result.error };
                 return { success: true, output: `Restored ${params.file} to last committed state.` };
             }
-            
+
             return { success: false, output: '', error: 'Invalid mode. Use "soft", "hard", or "file".' };
         }
     },
@@ -137,7 +169,7 @@ export const GIT_TOOLS: Record<string, Tool> = {
         },
         async execute(params, workspaceRoot) {
             const count = params.count || 10;
-            const result = await runGit(`log --oneline -${count}`, workspaceRoot);
+            const result = await runGit(['log', '--oneline', `-${count}`], workspaceRoot);
             if (!result.success) return { success: false, output: '', error: result.error };
             return { success: true, output: `Recent commits:\n${result.output}` };
         }
@@ -152,23 +184,23 @@ export const GIT_TOOLS: Record<string, Tool> = {
         },
         async execute(params, workspaceRoot) {
             if (params.action === 'list') {
-                const result = await runGit('branch -a', workspaceRoot);
+                const result = await runGit(['branch', '-a'], workspaceRoot);
                 if (!result.success) return { success: false, output: '', error: result.error };
                 return { success: true, output: `Branches:\n${result.output}` };
             }
-            
+
             if (params.action === 'create' && params.name) {
-                const result = await runGit(`checkout -b "${params.name}"`, workspaceRoot);
+                const result = await runGit(['checkout', '-b', params.name], workspaceRoot);
                 if (!result.success) return { success: false, output: '', error: result.error };
                 return { success: true, output: `Created and switched to branch: ${params.name}` };
             }
-            
+
             if (params.action === 'switch' && params.name) {
-                const result = await runGit(`checkout "${params.name}"`, workspaceRoot);
+                const result = await runGit(['checkout', params.name], workspaceRoot);
                 if (!result.success) return { success: false, output: '', error: result.error };
                 return { success: true, output: `Switched to branch: ${params.name}` };
             }
-            
+
             return { success: false, output: '', error: 'Invalid action or missing branch name' };
         }
     },
@@ -182,24 +214,27 @@ export const GIT_TOOLS: Record<string, Tool> = {
         },
         async execute(params, workspaceRoot) {
             if (params.action === 'save') {
-                const msg = params.message ? `-m "${params.message}"` : '';
-                const result = await runGit(`stash ${msg}`.trim(), workspaceRoot);
+                const args = ['stash'];
+                if (params.message) {
+                    args.push('-m', params.message);
+                }
+                const result = await runGit(args, workspaceRoot);
                 if (!result.success) return { success: false, output: '', error: result.error };
                 return { success: true, output: 'Changes stashed successfully' };
             }
-            
+
             if (params.action === 'pop') {
-                const result = await runGit('stash pop', workspaceRoot);
+                const result = await runGit(['stash', 'pop'], workspaceRoot);
                 if (!result.success) return { success: false, output: '', error: result.error };
                 return { success: true, output: 'Restored stashed changes' };
             }
-            
+
             if (params.action === 'list') {
-                const result = await runGit('stash list', workspaceRoot);
+                const result = await runGit(['stash', 'list'], workspaceRoot);
                 if (!result.success) return { success: false, output: '', error: result.error };
                 return { success: true, output: result.output || 'No stashes' };
             }
-            
+
             return { success: false, output: '', error: 'Invalid action. Use "save", "pop", or "list".' };
         }
     }
