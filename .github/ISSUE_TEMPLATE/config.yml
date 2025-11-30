@@ -1,0 +1,11 @@
+blank_issues_enabled: true
+contact_links:
+  - name: 💬 GitHub Discussions
+    url: https://github.com/fattits30-dev/liftoff/discussions
+    about: Ask questions, share ideas, or discuss the project
+  - name: 📚 Documentation
+    url: https://github.com/fattits30-dev/liftoff/blob/main/README.md
+    about: Read the project documentation
+  - name: 🤖 Claude AI Help
+    url: https://github.com/fattits30-dev/liftoff/blob/main/CLAUDE_GITHUB_INTEGRATION.md
+    about: Learn how Claude AI assists with code reviews and issue analysis

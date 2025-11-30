@@ -1,0 +1,106 @@
+name: Release Extension
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'  # Trigger on version tags like v1.0.0
+
+permissions:
+  contents: write  # Needed to create releases
+
+jobs:
+  build-and-release:
+    name: Build and Create Release
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Compile TypeScript
+        run: npm run compile
+
+      - name: Package extension
+        run: npx @vscode/vsce package --allow-missing-repository
+
+      - name: Get version from tag
+        id: get_version
+        run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+
+      - name: Generate changelog
+        id: changelog
+        run: |
+          # Extract changelog for this version from CHANGELOG.md if it exists
+          if [ -f "CHANGELOG.md" ]; then
+            # Get content between this version and previous version
+            CHANGELOG=$(awk '/^## \[${{ steps.get_version.outputs.VERSION }}\]/{flag=1;next}/^## \[/{flag=0}flag' CHANGELOG.md)
+            if [ -z "$CHANGELOG" ]; then
+              CHANGELOG="See commit history for changes in this release."
+            fi
+          else
+            CHANGELOG="See commit history for changes in this release."
+          fi
+          echo "CHANGELOG<<EOF" >> $GITHUB_OUTPUT
+          echo "$CHANGELOG" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: '*.vsix'
+          body: |
+            ## Liftoff Extension v${{ steps.get_version.outputs.VERSION }}
+
+            ### Changes
+
+            ${{ steps.changelog.outputs.CHANGELOG }}
+
+            ### Installation
+
+            1. Download the `.vsix` file below
+            2. In VS Code, go to Extensions (Ctrl+Shift+X)
+            3. Click the "..." menu → Install from VSIX
+            4. Select the downloaded file
+
+            ### Requirements
+
+            - VS Code 1.85.0 or higher
+            - HuggingFace API key (for AI features)
+
+            ### Quick Start
+
+            1. Press `Ctrl+Shift+P` (or `Cmd+Shift+P` on Mac)
+            2. Type "Liftoff: Set API Key"
+            3. Enter your HuggingFace API key
+            4. Run "Liftoff: Build App"
+            5. Describe your app in natural language
+
+            ### Links
+
+            - [Documentation](https://github.com/fattits30-dev/liftoff/blob/main/README.md)
+            - [Report Bug](https://github.com/fattits30-dev/liftoff/issues/new?template=bug_report.yml)
+            - [Request Feature](https://github.com/fattits30-dev/liftoff/issues/new?template=feature_request.yml)
+
+            ---
+
+            **Full Changelog**: https://github.com/fattits30-dev/liftoff/compare/v${{ steps.get_version.outputs.VERSION }}...HEAD
+          draft: false
+          prerelease: ${{ contains(steps.get_version.outputs.VERSION, '-') }}
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload to VS Code Marketplace (manual)
+        run: |
+          echo "📦 VSIX file ready for manual upload to VS Code Marketplace"
+          echo "🔗 Upload at: https://marketplace.visualstudio.com/manage"
+          echo "📄 File: liftoff-${{ steps.get_version.outputs.VERSION }}.vsix"
