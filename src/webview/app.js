@@ -490,7 +490,10 @@ function renderFiles() {
     // Render agents first
     if (agents.length > 0) {
         html += '<div class="agents-section" style="margin-bottom: 12px;">';
-        html += '<div style="font-size: 11px; color: var(--text-muted); margin-bottom: 6px; text-transform: uppercase;">Active Agents</div>';
+        html += '<div style="font-size: 11px; color: var(--text-muted); margin-bottom: 6px; text-transform: uppercase; display: flex; justify-content: space-between;">';
+        html += '<span>Active Agents</span>';
+        html += '<span style="color: var(--accent);">' + agents.length + ' total</span>';
+        html += '</div>';
         agents.forEach(agent => {
             const statusIcon = agent.status === 'running' ? '🔄' : agent.status === 'completed' ? '✅' : '❌';
             const statusClass = agent.status === 'running' ? 'running' : agent.status === 'completed' ? 'success' : 'error';
@@ -699,6 +702,8 @@ window.addEventListener('message', e => {
         case 'agents':
             // Full agent list update
             agents = msg.agents || [];
+            console.log('[Webview] Received agents update:', agents.length, 'agents');
+            agents.forEach((a, i) => console.log(`  [${i+1}] ${a.name} (${a.status})`));
             renderAgents();
             updateStats();
             break;

@@ -73,9 +73,15 @@ export class ManagerViewProvider implements vscode.WebviewViewProvider {
 
     private updateView(): void {
         if (this._view) {
-            const agents = this.agentManager.getAllAgents().map((a: IAgent) => ({
+            const allAgents = this.agentManager.getAllAgents();
+            const agents = allAgents.map((a: IAgent) => ({
                 id: a.id, name: a.name, status: a.status, task: a.task, iterations: a.iterations, type: a.type
             }));
+
+            // Debug logging
+            console.log(`[ManagerView] Updating with ${agents.length} agents:`,
+                agents.map(a => `${a.name} (${a.status})`).join(', '));
+
             this._view.webview.postMessage({ type: 'agents', agents });
         }
     }
