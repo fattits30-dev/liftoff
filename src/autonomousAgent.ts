@@ -11,6 +11,7 @@ import { AgentMemory, SemanticMemoryStore } from './memory/agentMemory';
 import { DEFAULT_CLOUD_MODEL_NAME, LIMITS } from './config';
 import { buildAgentSystemPrompt } from './config/prompts';
 import { AgentType, AgentStatus } from './types/agentTypes';
+import { AgentViewProvider } from './agentViewProvider';
 export { AgentType, AgentStatus } from './types/agentTypes';
 
 export interface Agent {
@@ -49,16 +50,20 @@ export class AutonomousAgentManager {
     private unifiedExecutor: UnifiedExecutor;
     private lessons: LessonsManager;
     private pendingErrors: Map<string, { error: string; context: string; timestamp: number }> = new Map();
-    
+
     // Track consecutive iterations without tool calls per agent
     private noToolCounts: Map<string, number> = new Map();
-    
+
     // Prevent race conditions - track which agents have active loops
     private activeLoops: Set<string> = new Set();
 
     // Memory system - dedicated memory for each agent
     private semanticMemory: SemanticMemoryStore | null = null;
     private agentMemories: Map<string, AgentMemory> = new Map();
+
+    // Dedicated agent view panels
+    private agentPanels: Map<string, AgentViewProvider> = new Map();
+    private extensionUri: vscode.Uri;
 
     private readonly _onAgentUpdate = new vscode.EventEmitter<Agent>();
     public readonly onAgentUpdate = this._onAgentUpdate.event;
@@ -78,6 +83,7 @@ export class AutonomousAgentManager {
     private workspaceRoot: string;
 
     constructor(context: vscode.ExtensionContext, semanticMemory?: SemanticMemoryStore) {
+        this.extensionUri = context.extensionUri;
         const workspaceFolders = vscode.workspace.workspaceFolders;
         this.workspaceRoot = workspaceFolders?.[0]?.uri.fsPath || process.cwd();
 
@@ -89,6 +95,46 @@ export class AutonomousAgentManager {
             this.semanticMemory = semanticMemory;
             this.outputChannel.appendLine('[AgentManager] Memory system initialized');
         }
+
+        // Wire up agent panel event forwarding
+        this.onAgentOutput(({ agentId, content, type }) => {
+            const panel = this.agentPanels.get(agentId);
+            if (panel) {
+                panel.appendOutput(content, type);
+            }
+        });
+
+        this.onAgentUpdate((agent) => {
+            const panel = this.agentPanels.get(agent.id);
+            if (panel) {
+                panel.updateAgent(agent);
+            }
+        });
+
+        this.onToolStart(({ tool, params }) => {
+            // Tool start events are captured via onToolComplete with full data
+        });
+
+        this.onToolComplete(({ tool, success, output, duration }) => {
+            // Find which agent executed this tool (most recent active agent)
+            for (const [agentId, agent] of this.agents) {
+                if (agent.status === 'running' && agent.toolHistory.length > 0) {
+                    const lastTool = agent.toolHistory[agent.toolHistory.length - 1];
+                    if (lastTool.tool === tool) {
+                        const panel = this.agentPanels.get(agentId);
+                        if (panel) {
+                            panel.appendToolExecution(
+                                tool,
+                                lastTool.params,
+                                success ? lastTool.result.output : undefined,
+                                success ? undefined : lastTool.result.error
+                            );
+                        }
+                        break;
+                    }
+                }
+            }
+        });
     }
 
     setApiKey(apiKey: string): void {
@@ -150,6 +196,11 @@ export class AutonomousAgentManager {
 
         this.agents.set(id, agent);
         this._onAgentUpdate.fire(agent);
+
+        // Create dedicated panel for this agent
+        const panel = new AgentViewProvider(this.extensionUri, agent);
+        this.agentPanels.set(id, panel);
+        panel.show();
 
         this.outputChannel.appendLine(`[AgentManager] Spawned ${agent.name} with task: ${task}`);
 
@@ -538,7 +589,16 @@ export class AutonomousAgentManager {
     public getAgent(id: string): Agent | undefined { return this.agents.get(id); }
     public getAllAgents(): Agent[] { return Array.from(this.agents.values()); }
     public getRunningAgents(): Agent[] { return this.getAllAgents().filter(a => a.status === 'running'); }
-    public removeAgent(id: string): void { this.agents.delete(id); }
+    public removeAgent(id: string): void {
+        // Dispose panel first
+        const panel = this.agentPanels.get(id);
+        if (panel) {
+            panel.dispose();
+            this.agentPanels.delete(id);
+        }
+        // Then remove agent
+        this.agents.delete(id);
+    }
     public getAllArtifacts(): Artifact[] { return this.getAllAgents().flatMap(a => a.artifacts); }
 
     public showOutput(): void {
