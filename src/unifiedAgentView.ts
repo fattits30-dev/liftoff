@@ -2,11 +2,8 @@ import * as vscode from 'vscode';
 import { Agent, AgentStatus } from './autonomousAgent';
 
 /**
- * Enhanced Agent View Provider with:
- * - Syntax highlighting for code
- * - Output filters (All/Thoughts/Tools/Errors)
- * - Collapsible tool execution sections
- * - Copy buttons for code/output
+ * Unified Agent View - Single panel showing ALL agents with tabs
+ * Replaces individual AgentViewProvider panels to avoid tab chaos
  */
 
 interface OutputMessage {
@@ -14,20 +11,17 @@ interface OutputMessage {
     content: string;
     type: 'thought' | 'tool' | 'result' | 'error';
     outputType?: string;
+    agentId: string;
 }
 
-export class AgentViewProvider {
+export class UnifiedAgentView {
     private panel: vscode.WebviewPanel | undefined;
     private disposables: vscode.Disposable[] = [];
-    private agent: Agent;
-    private outputBuffer: OutputMessage[] = [];
+    private agents: Map<string, Agent> = new Map();
+    private outputBuffers: Map<string, OutputMessage[]> = new Map();
+    private activeAgentId: string | null = null;
 
-    constructor(
-        private readonly extensionUri: vscode.Uri,
-        agent: Agent
-    ) {
-        this.agent = agent;
-    }
+    constructor(private readonly extensionUri: vscode.Uri) {}
 
     public show(): void {
         const column = vscode.ViewColumn.Beside;
@@ -37,10 +31,9 @@ export class AgentViewProvider {
             return;
         }
 
-        const emoji = this.getAgentEmoji(this.agent.type);
         this.panel = vscode.window.createWebviewPanel(
-            `liftoff.agent.${this.agent.id}`,
-            `${emoji} ${this.agent.name}`,
+            'liftoff.agents',
+            '🤖 Liftoff Agents',
             column,
             {
                 enableScripts: true,
@@ -58,15 +51,18 @@ export class AgentViewProvider {
         this.panel.webview.onDidReceiveMessage(
             message => {
                 switch (message.command) {
-                    case 'stop':
-                        vscode.commands.executeCommand('liftoff.stopAgent', this.agent.id);
+                    case 'switchAgent':
+                        this.activeAgentId = message.agentId;
+                        this.sendUpdate();
                         break;
-                    case 'continue':
-                        vscode.commands.executeCommand('liftoff.continueAgent', this.agent.id, message.text);
+                    case 'stop':
+                        vscode.commands.executeCommand('liftoff.stopAgent', message.agentId);
                         break;
                     case 'clear':
-                        this.outputBuffer = [];
-                        this.sendUpdate();
+                        if (message.agentId) {
+                            this.outputBuffers.set(message.agentId, []);
+                            this.sendUpdate();
+                        }
                         break;
                     case 'copy':
                         vscode.env.clipboard.writeText(message.text);
@@ -76,65 +72,90 @@ export class AgentViewProvider {
             null,
             this.disposables
         );
-
-        this.sendUpdate();
     }
 
-    public appendOutput(content: string, type: 'thought' | 'tool' | 'result' | 'error' = 'thought'): void {
-        this.outputBuffer.push({
-            timestamp: new Date().toISOString(),
-            content,
-            type,
-            outputType: type
-        });
-
-        // Keep last 500 messages
-        if (this.outputBuffer.length > 500) {
-            this.outputBuffer = this.outputBuffer.slice(-500);
+    public addAgent(agent: Agent): void {
+        this.agents.set(agent.id, agent);
+        if (!this.outputBuffers.has(agent.id)) {
+            this.outputBuffers.set(agent.id, []);
         }
+        // Auto-switch to the newest agent
+        this.activeAgentId = agent.id;
 
-        this.sendUpdate();
-    }
-
-    public appendToolExecution(tool: string, params: any, result?: any, error?: any): void {
-        this.outputBuffer.push({
-            timestamp: new Date().toISOString(),
-            content: JSON.stringify({ tool, params, result, error }),
-            type: 'tool',
-            outputType: 'tool'
-        });
-
+        // Ensure panel exists before sending update
+        if (!this.panel) {
+            this.show();
+        }
         this.sendUpdate();
     }
 
     public updateAgent(agent: Agent): void {
-        this.agent = agent;
-
+        this.agents.set(agent.id, agent);
         if (this.panel) {
-            const emoji = this.getAgentEmoji(agent.type);
-            this.panel.title = `${emoji} ${agent.name}`;
             this.sendUpdate();
         }
     }
 
-    private sendUpdate(): void {
-        if (this.panel) {
-            this.panel.webview.postMessage({
-                type: 'update',
-                agent: {
-                    id: this.agent.id,
-                    name: this.agent.name,
-                    type: this.agent.type,
-                    status: this.agent.status,
-                    task: this.agent.task,
-                    iterations: this.agent.iterations,
-                    maxIterations: this.agent.maxIterations || 30,
-                    startTime: this.agent.startTime.toISOString(),
-                    endTime: this.agent.endTime?.toISOString()
-                },
-                output: this.outputBuffer
-            });
+    public removeAgent(agentId: string): void {
+        this.agents.delete(agentId);
+        this.outputBuffers.delete(agentId);
+
+        // Switch to another agent if we removed the active one
+        if (this.activeAgentId === agentId) {
+            const agentIds = Array.from(this.agents.keys());
+            this.activeAgentId = agentIds.length > 0 ? agentIds[0] : null;
         }
+
+        this.sendUpdate();
+    }
+
+    public appendOutput(agentId: string, content: string, type: 'thought' | 'tool' | 'result' | 'error' = 'thought'): void {
+        if (!this.outputBuffers.has(agentId)) {
+            this.outputBuffers.set(agentId, []);
+        }
+
+        const buffer = this.outputBuffers.get(agentId)!;
+        buffer.push({
+            timestamp: new Date().toISOString(),
+            content,
+            type,
+            outputType: type,
+            agentId
+        });
+
+        // Keep last 500 messages per agent
+        if (buffer.length > 500) {
+            this.outputBuffers.set(agentId, buffer.slice(-500));
+        }
+
+        this.sendUpdate();
+    }
+
+    public appendToolExecution(agentId: string, tool: string, params: any, result?: any, error?: any): void {
+        this.appendOutput(agentId, JSON.stringify({ tool, params, result, error }), 'tool');
+    }
+
+    private sendUpdate(): void {
+        if (!this.panel) return;
+
+        const agentData = Array.from(this.agents.values()).map(agent => ({
+            id: agent.id,
+            name: agent.name,
+            type: agent.type,
+            status: agent.status,
+            task: agent.task,
+            iterations: agent.iterations,
+            maxIterations: agent.maxIterations || 30,
+            startTime: agent.startTime.toISOString(),
+            endTime: agent.endTime?.toISOString()
+        }));
+
+        this.panel.webview.postMessage({
+            type: 'update',
+            agents: agentData,
+            activeAgentId: this.activeAgentId,
+            outputs: Object.fromEntries(this.outputBuffers)
+        });
     }
 
     private getAgentEmoji(type: string): string {
@@ -161,7 +182,7 @@ export class AgentViewProvider {
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Agent Monitor</title>
+    <title>Liftoff Agents</title>
     <style>
         * { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -195,6 +216,60 @@ export class AgentViewProvider {
             overflow: hidden;
         }
 
+        /* Agent Tabs */
+        .agent-tabs {
+            display: flex;
+            gap: 4px;
+            background: var(--bg-secondary);
+            border-bottom: 1px solid var(--border);
+            padding: 8px 12px 0;
+            overflow-x: auto;
+            flex-shrink: 0;
+        }
+
+        .agent-tab {
+            padding: 8px 16px;
+            background: var(--bg-tertiary);
+            border: 1px solid var(--border);
+            border-bottom: none;
+            border-radius: var(--radius) var(--radius) 0 0;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            white-space: nowrap;
+            transition: all 0.2s;
+        }
+
+        .agent-tab:hover {
+            background: var(--bg-hover);
+        }
+
+        .agent-tab.active {
+            background: var(--bg-primary);
+            border-color: var(--accent);
+        }
+
+        .agent-tab-emoji {
+            font-size: 14px;
+        }
+
+        .agent-tab-name {
+            font-weight: 500;
+        }
+
+        .agent-tab-status {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            margin-left: 4px;
+        }
+
+        .agent-tab-status.running { background: var(--success); }
+        .agent-tab-status.waiting { background: var(--warning); }
+        .agent-tab-status.error { background: var(--error); }
+        .agent-tab-status.completed { background: var(--info); }
+
         /* Header */
         .header {
             background: var(--bg-secondary);
@@ -219,6 +294,27 @@ export class AgentViewProvider {
         .agent-task {
             color: var(--text-secondary);
             font-size: 12px;
+        }
+
+        .stats {
+            display: flex;
+            gap: 20px;
+        }
+
+        .stat {
+            text-align: right;
+        }
+
+        .stat-label {
+            color: var(--text-muted);
+            font-size: 11px;
+            margin-bottom: 2px;
+        }
+
+        .stat-value {
+            font-family: var(--font-mono);
+            font-size: 14px;
+            font-weight: 600;
         }
 
         .status-badge {
@@ -468,35 +564,14 @@ export class AgentViewProvider {
         .empty-text {
             font-size: 14px;
         }
-
-        /* Stats */
-        .stats {
-            display: flex;
-            gap: 20px;
-            margin-left: auto;
-        }
-
-        .stat {
-            text-align: right;
-        }
-
-        .stat-label {
-            color: var(--text-muted);
-            font-size: 11px;
-            margin-bottom: 2px;
-        }
-
-        .stat-value {
-            font-family: var(--font-mono);
-            font-size: 14px;
-            font-weight: 600;
-        }
     </style>
 </head>
 <body>
-    <div class="header">
+    <div class="agent-tabs" id="agentTabs"></div>
+
+    <div class="header" id="header" style="display: none;">
         <div class="agent-info">
-            <div class="agent-name" id="agentName">Agent</div>
+            <div class="agent-name" id="agentName">No agent selected</div>
             <div class="agent-task" id="agentTask">Idle</div>
         </div>
         <div class="status-badge" id="statusBadge">idle</div>
@@ -508,17 +583,13 @@ export class AgentViewProvider {
                 </div>
             </div>
             <div class="stat">
-                <div class="stat-label">Tools</div>
-                <div class="stat-value" id="toolCount">0</div>
-            </div>
-            <div class="stat">
                 <div class="stat-label">Elapsed</div>
                 <div class="stat-value" id="elapsed">0s</div>
             </div>
         </div>
     </div>
 
-    <div class="toolbar">
+    <div class="toolbar" id="toolbar" style="display: none;">
         <div class="filter-group">
             <button class="filter-btn active" data-filter="all">All</button>
             <button class="filter-btn" data-filter="thought">Thoughts</button>
@@ -531,19 +602,19 @@ export class AgentViewProvider {
 
     <div class="console-container" id="console">
         <div class="empty-state">
-            <div class="empty-icon">🚀</div>
-            <div class="empty-text">Waiting for agent output...</div>
+            <div class="empty-icon">🤖</div>
+            <div class="empty-text">No agents running. Spawn an agent to see output here.</div>
         </div>
     </div>
 
     <script>
         const vscode = acquireVsCodeApi();
 
-        let agent = null;
-        let startTime = null;
-        let elapsedInterval = null;
-        let toolExecutionCount = 0;
+        let agents = [];
+        let activeAgentId = null;
+        let outputs = {};
         let currentFilter = 'all';
+        let elapsedInterval = null;
 
         // Filter handling
         document.querySelectorAll('.filter-btn').forEach(btn => {
@@ -578,33 +649,80 @@ export class AgentViewProvider {
             }
         }
 
-        function updateAgent(data) {
-            agent = data;
-            if (!startTime) startTime = new Date(data.startTime);
+        function switchAgent(agentId) {
+            activeAgentId = agentId;
+            vscode.postMessage({ command: 'switchAgent', agentId });
+            renderActiveAgent();
+        }
 
-            document.getElementById('agentName').textContent = data.name;
-            document.getElementById('agentTask').textContent = data.task || 'No task';
+        function renderTabs() {
+            const tabsContainer = document.getElementById('agentTabs');
+            tabsContainer.innerHTML = '';
+
+            agents.forEach(agent => {
+                const tab = document.createElement('div');
+                tab.className = 'agent-tab' + (agent.id === activeAgentId ? ' active' : '');
+                tab.onclick = () => switchAgent(agent.id);
+
+                const emoji = getAgentEmoji(agent.type);
+                const statusDot = document.createElement('div');
+                statusDot.className = 'agent-tab-status ' + agent.status;
+
+                tab.innerHTML = '<span class="agent-tab-emoji">' + emoji + '</span>' +
+                                '<span class="agent-tab-name">' + agent.name + '</span>';
+                tab.appendChild(statusDot);
+
+                tabsContainer.appendChild(tab);
+            });
+        }
+
+        function renderActiveAgent() {
+            const agent = agents.find(a => a.id === activeAgentId);
+
+            if (!agent) {
+                document.getElementById('header').style.display = 'none';
+                document.getElementById('toolbar').style.display = 'none';
+                document.getElementById('console').innerHTML = '<div class="empty-state"><div class="empty-icon">🤖</div><div class="empty-text">No agents running.</div></div>';
+                return;
+            }
+
+            document.getElementById('header').style.display = 'flex';
+            document.getElementById('toolbar').style.display = 'flex';
+
+            document.getElementById('agentName').textContent = agent.name;
+            document.getElementById('agentTask').textContent = agent.task || 'No task';
 
             const statusBadge = document.getElementById('statusBadge');
-            statusBadge.textContent = data.status;
-            statusBadge.className = 'status-badge ' + data.status;
+            statusBadge.textContent = agent.status;
+            statusBadge.className = 'status-badge ' + agent.status;
 
-            document.getElementById('iterations').textContent = data.iterations || 0;
-            document.getElementById('maxIterations').textContent = '/ ' + (data.maxIterations || 30);
+            document.getElementById('iterations').textContent = agent.iterations || 0;
+            document.getElementById('maxIterations').textContent = '/ ' + (agent.maxIterations || 30);
 
-            if (data.status === 'running' && !elapsedInterval) {
-                elapsedInterval = setInterval(updateElapsed, 1000);
-            } else if (data.status !== 'running' && elapsedInterval) {
+            // Render output
+            const console = document.getElementById('console');
+            console.innerHTML = '';
+
+            const agentOutputs = outputs[agent.id] || [];
+            if (agentOutputs.length === 0) {
+                console.innerHTML = '<div class="empty-state"><div class="empty-icon">🚀</div><div class="empty-text">Waiting for agent output...</div></div>';
+            } else {
+                agentOutputs.forEach(msg => appendOutput(msg));
+            }
+
+            if (agent.status === 'running' && !elapsedInterval) {
+                elapsedInterval = setInterval(() => updateElapsed(agent), 1000);
+            } else if (agent.status !== 'running' && elapsedInterval) {
                 clearInterval(elapsedInterval);
                 elapsedInterval = null;
             }
 
-            updateElapsed();
+            updateElapsed(agent);
         }
 
-        function updateElapsed() {
-            if (!startTime) return;
-            const endTime = agent?.endTime ? new Date(agent.endTime) : new Date();
+        function updateElapsed(agent) {
+            const startTime = new Date(agent.startTime);
+            const endTime = agent.endTime ? new Date(agent.endTime) : new Date();
             const elapsed = Math.floor((endTime - startTime) / 1000);
             document.getElementById('elapsed').textContent = formatDuration(elapsed);
         }
@@ -664,9 +782,6 @@ export class AgentViewProvider {
             const console = document.getElementById('console');
             const emptyState = console.querySelector('.empty-state');
             if (emptyState) emptyState.remove();
-
-            toolExecutionCount++;
-            document.getElementById('toolCount').textContent = toolExecutionCount;
 
             const data = JSON.parse(msg.content);
             const card = document.createElement('div');
@@ -758,14 +873,27 @@ export class AgentViewProvider {
         }
 
         function clearConsole() {
-            vscode.postMessage({ command: 'clear' });
-            document.getElementById('console').innerHTML = '<div class="empty-state"><div class="empty-icon">🚀</div><div class="empty-text">Console cleared</div></div>';
-            toolExecutionCount = 0;
-            document.getElementById('toolCount').textContent = '0';
+            if (activeAgentId) {
+                vscode.postMessage({ command: 'clear', agentId: activeAgentId });
+            }
         }
 
         function stopAgent() {
-            vscode.postMessage({ command: 'stop' });
+            if (activeAgentId) {
+                vscode.postMessage({ command: 'stop', agentId: activeAgentId });
+            }
+        }
+
+        function getAgentEmoji(type) {
+            const emojis = {
+                frontend: '🎨',
+                backend: '⚙️',
+                testing: '🧪',
+                browser: '🌐',
+                general: '🔧',
+                cleaner: '🧹'
+            };
+            return emojis[type] || '🤖';
         }
 
         window.addEventListener('message', event => {
@@ -773,10 +901,11 @@ export class AgentViewProvider {
 
             switch (message.type) {
                 case 'update':
-                    updateAgent(message.agent);
-                    if (message.output && message.output.length > 0) {
-                        message.output.forEach(appendOutput);
-                    }
+                    agents = message.agents || [];
+                    activeAgentId = message.activeAgentId;
+                    outputs = message.outputs || {};
+                    renderTabs();
+                    renderActiveAgent();
                     break;
             }
         });

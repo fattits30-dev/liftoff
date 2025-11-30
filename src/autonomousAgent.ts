@@ -11,7 +11,7 @@ import { AgentMemory, SemanticMemoryStore } from './memory/agentMemory';
 import { DEFAULT_CLOUD_MODEL_NAME, LIMITS } from './config';
 import { buildAgentSystemPrompt } from './config/prompts';
 import { AgentType, AgentStatus } from './types/agentTypes';
-import { AgentViewProvider } from './agentViewProvider';
+import { UnifiedAgentView } from './unifiedAgentView';
 import { LoopDetector } from './collaboration/loopDetector';
 export { AgentType, AgentStatus } from './types/agentTypes';
 
@@ -62,8 +62,8 @@ export class AutonomousAgentManager {
     private semanticMemory: SemanticMemoryStore | null = null;
     private agentMemories: Map<string, AgentMemory> = new Map();
 
-    // Dedicated agent view panels
-    private agentPanels: Map<string, AgentViewProvider> = new Map();
+    // Unified agent view (single panel for all agents)
+    private unifiedView: UnifiedAgentView;
     private extensionUri: vscode.Uri;
 
     // Loop detection
@@ -102,6 +102,9 @@ export class AutonomousAgentManager {
         this.workspaceRoot = workspaceFolders?.[0]?.uri.fsPath || process.cwd();
 
         this.outputChannel = vscode.window.createOutputChannel('Liftoff Agents');
+
+        // Initialize unified agent view (single panel for all agents)
+        this.unifiedView = new UnifiedAgentView(this.extensionUri);
         this.unifiedExecutor = new UnifiedExecutor(this.workspaceRoot);
         this.lessons = new LessonsManager(this.workspaceRoot);
 
@@ -110,19 +113,13 @@ export class AutonomousAgentManager {
             this.outputChannel.appendLine('[AgentManager] Memory system initialized');
         }
 
-        // Wire up agent panel event forwarding
+        // Wire up unified view event forwarding
         this.onAgentOutput(({ agentId, content, type }) => {
-            const panel = this.agentPanels.get(agentId);
-            if (panel) {
-                panel.appendOutput(content, type);
-            }
+            this.unifiedView.appendOutput(agentId, content, type);
         });
 
         this.onAgentUpdate((agent) => {
-            const panel = this.agentPanels.get(agent.id);
-            if (panel) {
-                panel.updateAgent(agent);
-            }
+            this.unifiedView.updateAgent(agent);
         });
 
         this.onToolStart(({ tool, params }) => {
@@ -135,15 +132,13 @@ export class AutonomousAgentManager {
                 if (agent.status === 'running' && agent.toolHistory.length > 0) {
                     const lastTool = agent.toolHistory[agent.toolHistory.length - 1];
                     if (lastTool.tool === tool) {
-                        const panel = this.agentPanels.get(agentId);
-                        if (panel) {
-                            panel.appendToolExecution(
-                                tool,
-                                lastTool.params,
-                                success ? lastTool.result.output : undefined,
-                                success ? undefined : lastTool.result.error
-                            );
-                        }
+                        this.unifiedView.appendToolExecution(
+                            agentId,
+                            tool,
+                            lastTool.params,
+                            success ? lastTool.result.output : undefined,
+                            success ? undefined : lastTool.result.error
+                        );
                         break;
                     }
                 }
@@ -211,10 +206,9 @@ export class AutonomousAgentManager {
         this.agents.set(id, agent);
         this._onAgentUpdate.fire(agent);
 
-        // Create dedicated panel for this agent
-        const panel = new AgentViewProvider(this.extensionUri, agent);
-        this.agentPanels.set(id, panel);
-        panel.show();
+        // Add agent to unified view
+        this.unifiedView.addAgent(agent);
+        this.unifiedView.show();
 
         this.outputChannel.appendLine(`[AgentManager] Spawned ${agent.name} with task: ${task}`);
 
@@ -639,12 +633,9 @@ export class AutonomousAgentManager {
     public getAllAgents(): Agent[] { return Array.from(this.agents.values()); }
     public getRunningAgents(): Agent[] { return this.getAllAgents().filter(a => a.status === 'running'); }
     public removeAgent(id: string): void {
-        // Dispose panel first
-        const panel = this.agentPanels.get(id);
-        if (panel) {
-            panel.dispose();
-            this.agentPanels.delete(id);
-        }
+        // Remove agent from unified view
+        this.unifiedView.removeAgent(id);
+
         // Clear loop detection history
         this.loopDetector.clearAgent(id);
         // Clean up other maps
