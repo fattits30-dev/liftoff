@@ -43,6 +43,7 @@ export default tseslint.config(
             'dist/**',
             'node_modules/**',
             'src/_legacy/**',
+            'src/appBuilder/templates/**',
             '**/*.js',
             '**/*.mjs',
         ],

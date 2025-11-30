@@ -1,5 +1,6 @@
 # Exclude template files from linting (they're copied to generated projects)
-src/appBuilder/templates/
+src/appBuilder/templates/**
+src/appBuilder/templates/**/*
 
 # Test files
 tests/
