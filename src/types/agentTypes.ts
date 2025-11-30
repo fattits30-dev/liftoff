@@ -76,7 +76,7 @@ export interface IAgentManager extends vscode.Disposable {
     getAllArtifacts(): Artifact[];
     
     // Configuration
-    setApiKey(apiKey: string): void;
+    setApiKey(apiKey: string): Promise<void>;
     
     // Connection testing
     testConnection(): Promise<boolean>;

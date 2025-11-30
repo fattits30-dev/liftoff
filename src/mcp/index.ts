@@ -3,8 +3,8 @@ export { McpClient, disposeMcpOutputChannel } from './client';
 export { McpRouter, getMcpRouter, disposeMcpRouter } from './router';
 export * from './types';
 
-// Unified Executor - Single 'execute' tool for 98% token reduction
-export { UnifiedExecutor, getUnifiedToolDescription, getExecuteToolSchema } from './unified-executor';
+// Local Tools Server - Browser, Git, Testing tools in MCP format
+export { LocalToolsServer, createLocalToolsServer } from './local-tools-server';
 
 // New Infrastructure (Phase 2 Refactor)
 export { McpServerManager, ServerConfig, ServerHealth, ServerStatus } from './server-manager';

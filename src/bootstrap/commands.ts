@@ -45,8 +45,8 @@ export function registerCommands(
                 placeHolder: 'hf_...'
             });
             if (apiKey) {
-                agentManager.setApiKey(apiKey);
-                orchestrator.setApiKey(apiKey);
+                await agentManager.setApiKey(apiKey);
+                await orchestrator.setApiKey(apiKey);
                 const ok = await agentManager.testConnection();
                 vscode.window.showInformationMessage(
                     ok ? '✅ API key verified!' : '⚠️ Key set but connection test failed'

@@ -1,4 +1,11 @@
-# Testing Guide
+# Testing Guide [DEPRECATED - See MIGRATION_SUMMARY.md]
+
+**⚠️ This document is outdated. The execute() migration is complete.**
+**See MIGRATION_SUMMARY.md for updated testing instructions.**
+
+---
+
+# Original Document (Historical Reference Only)
 
 ## Quick Test: Is Everything Working?
 

@@ -29,3 +29,21 @@ export {
     loadBuildState,
     hasBuildState
 } from './buildState';
+
+// Liftoff plan management
+export {
+    LiftoffPlan,
+    createInitialPlan,
+    updatePhaseStatus,
+    addFeature,
+    updateFeatureStatus,
+    canStartPhase,
+    getOrchestratorInstructions,
+    serializePlan,
+    deserializePlan,
+    BuildMode,
+    PhaseStatus,
+    PhaseDefinition,
+    FeatureProgress,
+    TaskProgress
+} from './liftoffPlan';

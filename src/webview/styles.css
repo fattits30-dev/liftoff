@@ -596,6 +596,7 @@ code {
 .tool-icon-wrapper.browser { background: var(--purple-muted); }
 .tool-icon-wrapper.git { background: var(--error-muted); }
 .tool-icon-wrapper.test { background: var(--accent-muted); }
+.tool-icon-wrapper.code { background: rgba(139, 92, 246, 0.15); } /* Serena semantic code tools */
 .tool-icon-wrapper.default { background: var(--bg-tertiary); }
 
 .tool-info { flex: 1; min-width: 0; }

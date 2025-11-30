@@ -28,21 +28,57 @@ const THOUGHT_FLUSH_MS = 120;
 // ============================================================================
 
 const toolCategories = {
-    'fs.read': { icon: '📄', category: 'file', label: 'Read File' },
-    'fs.write': { icon: '✏️', category: 'file', label: 'Write File' },
-    'fs.list': { icon: '📁', category: 'file', label: 'List Directory' },
-    'fs.search': { icon: '🔍', category: 'file', label: 'Search Files' },
-    'fs.delete': { icon: '🗑️', category: 'file', label: 'Delete' },
-    'shell.run': { icon: '💻', category: 'shell', label: 'Run Command' },
-    'git.status': { icon: '📊', category: 'git', label: 'Git Status' },
-    'git.diff': { icon: '📝', category: 'git', label: 'Git Diff' },
-    'git.commit': { icon: '✅', category: 'git', label: 'Git Commit' },
-    'test.run': { icon: '🧪', category: 'test', label: 'Run Tests' },
-    'browser.navigate': { icon: '🌐', category: 'browser', label: 'Navigate' },
-    'browser.click': { icon: '👆', category: 'browser', label: 'Click' },
-    'browser.type': { icon: '⌨️', category: 'browser', label: 'Type' },
-    'browser.screenshot': { icon: '📸', category: 'browser', label: 'Screenshot' },
-    'browser.eval': { icon: '⚡', category: 'browser', label: 'Evaluate' },
+    // MCP Filesystem Tools (new format)
+    'read_file': { icon: '📄', category: 'file', label: 'Read File' },
+    'write_file': { icon: '✏️', category: 'file', label: 'Write File' },
+    'list_directory': { icon: '📁', category: 'file', label: 'List Directory' },
+    'search_files': { icon: '🔍', category: 'file', label: 'Search Files' },
+    'create_directory': { icon: '📁', category: 'file', label: 'Create Directory' },
+    'move_file': { icon: '🔀', category: 'file', label: 'Move File' },
+    'get_file_info': { icon: 'ℹ️', category: 'file', label: 'File Info' },
+
+    // MCP Local Tools (new format with local__ prefix)
+    'local__run_command': { icon: '💻', category: 'shell', label: 'Run Command' },
+    'local__run_tests': { icon: '🧪', category: 'test', label: 'Run Tests' },
+    'local__git_status': { icon: '📊', category: 'git', label: 'Git Status' },
+    'local__git_diff': { icon: '📝', category: 'git', label: 'Git Diff' },
+    'local__git_commit': { icon: '✅', category: 'git', label: 'Git Commit' },
+    'local__git_log': { icon: '📜', category: 'git', label: 'Git Log' },
+    'local__git_branch': { icon: '🌿', category: 'git', label: 'Git Branch' },
+    'local__browser_navigate': { icon: '🌐', category: 'browser', label: 'Navigate' },
+    'local__browser_click': { icon: '👆', category: 'browser', label: 'Click' },
+    'local__browser_type': { icon: '⌨️', category: 'browser', label: 'Type' },
+    'local__browser_screenshot': { icon: '📸', category: 'browser', label: 'Screenshot' },
+    'local__browser_get_elements': { icon: '🔎', category: 'browser', label: 'Get Elements' },
+    'local__browser_get_text': { icon: '📝', category: 'browser', label: 'Get Text' },
+    'local__browser_wait': { icon: '⏳', category: 'browser', label: 'Wait' },
+    'local__browser_close': { icon: '❌', category: 'browser', label: 'Close Browser' },
+
+    // Serena Semantic Code Tools
+    'find_symbol': { icon: '🔍', category: 'code', label: 'Find Symbol' },
+    'replace_symbol_body': { icon: '🔧', category: 'code', label: 'Replace Symbol' },
+    'insert_after_symbol': { icon: '➕', category: 'code', label: 'Insert Code' },
+    'find_referencing_symbols': { icon: '🔗', category: 'code', label: 'Find References' },
+    'get_symbol_definition': { icon: '📖', category: 'code', label: 'Get Definition' },
+    'get_symbol_documentation': { icon: '📚', category: 'code', label: 'Get Docs' },
+    'rename_symbol': { icon: '✏️', category: 'code', label: 'Rename Symbol' },
+
+    // Legacy execute() format (deprecated but kept for compatibility)
+    'fs.read': { icon: '📄', category: 'file', label: 'Read File (legacy)' },
+    'fs.write': { icon: '✏️', category: 'file', label: 'Write File (legacy)' },
+    'fs.list': { icon: '📁', category: 'file', label: 'List Directory (legacy)' },
+    'fs.search': { icon: '🔍', category: 'file', label: 'Search Files (legacy)' },
+    'fs.delete': { icon: '🗑️', category: 'file', label: 'Delete (legacy)' },
+    'shell.run': { icon: '💻', category: 'shell', label: 'Run Command (legacy)' },
+    'git.status': { icon: '📊', category: 'git', label: 'Git Status (legacy)' },
+    'git.diff': { icon: '📝', category: 'git', label: 'Git Diff (legacy)' },
+    'git.commit': { icon: '✅', category: 'git', label: 'Git Commit (legacy)' },
+    'test.run': { icon: '🧪', category: 'test', label: 'Run Tests (legacy)' },
+    'browser.navigate': { icon: '🌐', category: 'browser', label: 'Navigate (legacy)' },
+    'browser.click': { icon: '👆', category: 'browser', label: 'Click (legacy)' },
+    'browser.type': { icon: '⌨️', category: 'browser', label: 'Type (legacy)' },
+    'browser.screenshot': { icon: '📸', category: 'browser', label: 'Screenshot (legacy)' },
+    'browser.eval': { icon: '⚡', category: 'browser', label: 'Evaluate (legacy)' },
 };
 
 // ============================================================================
@@ -50,15 +86,40 @@ const toolCategories = {
 // ============================================================================
 
 function getToolInfo(name) {
+    // Exact match first
     if (toolCategories[name]) return toolCategories[name];
+
+    // Check for partial matches in tool categories
     for (const [key, value] of Object.entries(toolCategories)) {
         if (name.startsWith(key) || name.includes(key)) return value;
     }
-    if (name.includes('file') || name.includes('read') || name.includes('write')) return { icon: '📄', category: 'file', label: name };
-    if (name.includes('shell') || name.includes('command')) return { icon: '💻', category: 'shell', label: name };
-    if (name.includes('test')) return { icon: '🧪', category: 'test', label: name };
-    if (name.includes('browser') || name.includes('page')) return { icon: '🌐', category: 'browser', label: name };
-    if (name.includes('git')) return { icon: '📊', category: 'git', label: name };
+
+    // MCP tool pattern matching
+    if (name.includes('file') || name.includes('read') || name.includes('write') || name.includes('directory')) {
+        return { icon: '📄', category: 'file', label: name };
+    }
+    if (name.includes('local__') && name.includes('command')) {
+        return { icon: '💻', category: 'shell', label: name.replace('local__', '') };
+    }
+    if (name.includes('local__git') || name.includes('git_')) {
+        return { icon: '📊', category: 'git', label: name.replace('local__', '').replace('_', ' ') };
+    }
+    if (name.includes('local__browser') || name.includes('browser_')) {
+        return { icon: '🌐', category: 'browser', label: name.replace('local__', '').replace('_', ' ') };
+    }
+    if (name.includes('test')) {
+        return { icon: '🧪', category: 'test', label: name };
+    }
+    if (name.includes('symbol') || name.includes('find_') || name.includes('replace_') || name.includes('insert_')) {
+        return { icon: '🔍', category: 'code', label: name.replace(/_/g, ' ') };
+    }
+
+    // Legacy execute() format
+    if (name.includes('shell') || name.includes('command')) {
+        return { icon: '💻', category: 'shell', label: name };
+    }
+
+    // Default fallback
     return { icon: '🔧', category: 'default', label: name };
 }
 

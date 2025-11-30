@@ -108,7 +108,7 @@ export async function activate(context: vscode.ExtensionContext) {
                 const config = vscode.workspace.getConfiguration('liftoff');
                 await config.update('huggingfaceApiKey', undefined, vscode.ConfigurationTarget.Global);
 
-                agentManager.setApiKey(apiKey);
+                await agentManager.setApiKey(apiKey);
                 await orchestrator.setApiKey(apiKey);
                 const ok = await agentManager.testConnection();
                 vscode.window.showInformationMessage(
@@ -746,7 +746,7 @@ This includes:
             'Set Key'
         ).then(a => { if (a) vscode.commands.executeCommand('liftoff.setApiKey'); });
     } else {
-        agentManager.setApiKey(apiKey);
+        await agentManager.setApiKey(apiKey);
         await orchestrator.setApiKey(apiKey);
     }
     

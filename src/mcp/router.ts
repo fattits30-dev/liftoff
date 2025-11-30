@@ -6,6 +6,7 @@ import * as path from 'path';
 import * as fs from 'fs';
 import { McpClient } from './client';
 import { McpServerConfig, McpTool, ToolCallResult, McpToolResult } from './types';
+import { LocalToolsServer } from './local-tools-server';
 
 export interface ToolDefinition {
     name: string;
@@ -22,6 +23,8 @@ export class McpRouter {
     private clients = new Map<string, McpClient>();
     private toolIndex = new Map<string, { server: string; tool: McpTool }>();
     private outputChannel: vscode.OutputChannel;
+    private localToolsServer: LocalToolsServer | null = null;
+    private workspaceRoot: string | null = null;
 
     constructor() {
         this.outputChannel = vscode.window.createOutputChannel('Liftoff MCP');
@@ -31,6 +34,9 @@ export class McpRouter {
      * Load MCP server configs from workspace or user settings
      */
     async loadConfig(workspaceRoot: string): Promise<McpServerConfig[]> {
+        // Store workspace root for later use
+        this.workspaceRoot = workspaceRoot;
+
         const configs: McpServerConfig[] = [];
 
         // Check for .mcp.json in workspace
@@ -66,9 +72,45 @@ export class McpRouter {
     }
 
     /**
+     * Initialize local tools server synchronously
+     * This allows immediate access to browser, git, and testing tools
+     */
+    public initializeLocalToolsSync(workspaceRoot: string): void {
+        if (this.localToolsServer) {
+            this.log('Local tools already initialized');
+            return;
+        }
+        this.workspaceRoot = workspaceRoot;
+        this.initializeLocalTools(workspaceRoot);
+    }
+
+    /**
+     * Initialize local tools server (browser, git, testing)
+     */
+    private initializeLocalTools(workspaceRoot: string): void {
+        try {
+            this.localToolsServer = new LocalToolsServer(workspaceRoot);
+
+            // Index all local tools
+            for (const tool of this.localToolsServer.listTools()) {
+                this.toolIndex.set(tool.name, { server: 'local', tool });
+            }
+
+            this.log(`Local tools server initialized: ${this.localToolsServer.getToolCount()} tools available`);
+        } catch (err: any) {
+            this.log(`Failed to initialize local tools server: ${err.message}`);
+        }
+    }
+
+    /**
      * Connect to all configured MCP servers
      */
     async connectAll(configs: McpServerConfig[]): Promise<void> {
+        // Initialize local tools server first
+        if (this.workspaceRoot && !this.localToolsServer) {
+            this.initializeLocalTools(this.workspaceRoot);
+        }
+
         const connectPromises = configs.map(async (config) => {
             // Skip if already connected
             const existingClient = this.clients.get(config.name);
@@ -156,6 +198,42 @@ export class McpRouter {
             };
         }
 
+        // Handle local tools specially
+        if (entry.server === 'local') {
+            if (!this.localToolsServer) {
+                return {
+                    success: false,
+                    output: '',
+                    error: 'Local tools server not initialized'
+                };
+            }
+
+            try {
+                const result: McpToolResult = await this.localToolsServer.callTool(name, args);
+
+                // Extract text content from MCP result format
+                const textContent = result.content
+                    .filter(c => c.type === 'text')
+                    .map(c => c.text || '')
+                    .join('\n');
+
+                return {
+                    success: !result.isError,
+                    output: textContent || 'No output',
+                    error: result.isError ? textContent : undefined,
+                    server: 'local'
+                };
+            } catch (err: any) {
+                return {
+                    success: false,
+                    output: '',
+                    error: err.message,
+                    server: 'local'
+                };
+            }
+        }
+
+        // Handle external MCP servers
         const client = this.clients.get(entry.server);
         if (!client || client.status !== 'ready') {
             return {

@@ -1,4 +1,11 @@
-# Orchestrator Workflow Fixes
+# Orchestrator Workflow Fixes [DEPRECATED - See MIGRATION_SUMMARY.md]
+
+**⚠️ This document is outdated. The execute() migration is complete.**
+**See MIGRATION_SUMMARY.md for current architecture.**
+
+---
+
+# Original Document (Historical Reference Only)
 
 ## Problems Found
 

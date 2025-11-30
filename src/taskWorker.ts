@@ -1,13 +1,25 @@
 /**
- * TaskWorker - Executes tool calls without LLM reasoning
- * 
- * This is a subprocess that simply executes what the Orchestrator tells it to.
- * NO LLM loop here - the Orchestrator is the only brain.
+ * TaskWorker [DEPRECATED]
+ * This worker is deprecated after migration to direct MCP tools.
+ * UnifiedExecutor was removed due to security vulnerabilities.
+ * Use MCP Router with local__ tools instead.
  */
 
 import * as vscode from 'vscode';
-import { UnifiedExecutor } from './mcp/unified-executor';
+// DEPRECATED: UnifiedExecutor removed due to VM sandbox security vulnerability
+// import { UnifiedExecutor } from './mcp/unified-executor';
 import { AgentType } from './types/agentTypes';
+
+// Type stub for deprecated UnifiedExecutor
+class UnifiedExecutor {
+    constructor(_workspaceRoot: string) {
+        throw new Error('UnifiedExecutor is deprecated due to security vulnerabilities. Use MCP tools instead.');
+    }
+    async execute(_code: string): Promise<any> {
+        throw new Error('execute() is deprecated. Use MCP tools instead.');
+    }
+    async dispose(): Promise<void> {}
+}
 
 export interface WorkerTask {
     id: string;

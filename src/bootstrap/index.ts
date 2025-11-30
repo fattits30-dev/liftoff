@@ -62,8 +62,8 @@ export async function bootstrap(
     const apiKey = config.get<string>('huggingfaceApiKey');
     
     if (apiKey) {
-        services.agentManager.setApiKey(apiKey);
-        services.orchestrator.setApiKey(apiKey);
+        await services.agentManager.setApiKey(apiKey);
+        await services.orchestrator.setApiKey(apiKey);
         services.log('API key loaded from configuration');
     } else {
         vscode.window.showInformationMessage(

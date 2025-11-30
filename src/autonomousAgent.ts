@@ -6,7 +6,6 @@ import { GIT_TOOLS } from './tools/git';
 import { LessonsManager } from './tools/lessons';
 import { Artifact } from './agentCommunication';
 import { getMcpRouter, McpRouter, disposeMcpRouter, disposeMcpOutputChannel } from './mcp';
-import { UnifiedExecutor, getUnifiedToolDescription } from './mcp/unified-executor';
 import { AgentMemory, SemanticMemoryStore } from './memory/agentMemory';
 import { DEFAULT_CLOUD_MODEL_NAME, LIMITS } from './config';
 import { buildAgentSystemPrompt } from './config/prompts';
@@ -48,7 +47,6 @@ export class AutonomousAgentManager {
     private agents: Map<string, Agent> = new Map();
     private outputChannel: vscode.OutputChannel;
     private defaultModel: string = DEFAULT_CLOUD_MODEL_NAME;
-    private unifiedExecutor: UnifiedExecutor;
     private lessons: LessonsManager;
     private pendingErrors: Map<string, { error: string; context: string; timestamp: number }> = new Map();
 
@@ -105,13 +103,15 @@ export class AutonomousAgentManager {
 
         // Initialize unified agent view (single panel for all agents)
         this.unifiedView = new UnifiedAgentView(this.extensionUri);
-        this.unifiedExecutor = new UnifiedExecutor(this.workspaceRoot);
         this.lessons = new LessonsManager(this.workspaceRoot);
 
         if (semanticMemory) {
             this.semanticMemory = semanticMemory;
             this.outputChannel.appendLine('[AgentManager] Memory system initialized');
         }
+
+        // Initialize MCP router immediately with workspace root for local tools
+        this.initMcpRouterWithWorkspace();
 
         // Wire up unified view event forwarding
         this.onAgentOutput(({ agentId, content, type }) => {
@@ -146,10 +146,48 @@ export class AutonomousAgentManager {
         });
     }
 
-    setApiKey(apiKey: string): void {
+    /**
+     * Initialize MCP router with workspace root (called in constructor)
+     * This ensures local tools are always available immediately
+     */
+    private initMcpRouterWithWorkspace(): void {
+        this.mcpRouter = getMcpRouter();
+
+        // Initialize local tools synchronously - this is fast and makes them immediately available
+        this.mcpRouter.initializeLocalToolsSync(this.workspaceRoot);
+
+        // Mark as initialized now that local tools are ready
+        this.mcpInitialized = true;
+        this.outputChannel.appendLine('[AgentManager] MCP Router initialized with local tools');
+
+        // Load and connect to external MCP servers asynchronously
+        this.loadMcpServersAsync();
+    }
+
+    /**
+     * Async initialization of external MCP servers (Serena, filesystem, etc.)
+     */
+    private async loadMcpServersAsync(): Promise<void> {
+        try {
+            if (!this.mcpRouter) return;
+            const configs = await this.mcpRouter.loadConfig(this.workspaceRoot);
+
+            if (configs.length > 0) {
+                // connectAll will skip local tools since they're already initialized
+                await this.mcpRouter.connectAll(configs);
+                this.outputChannel.appendLine(`[AgentManager] Connected to ${configs.length} external MCP server(s)`);
+            } else {
+                this.outputChannel.appendLine(`[AgentManager] No external MCP servers configured`);
+            }
+        } catch (err: any) {
+            this.outputChannel.appendLine(`[AgentManager] External MCP servers initialization failed: ${err.message}`);
+        }
+    }
+
+    async setApiKey(apiKey: string): Promise<void> {
         this.hfProvider = new HuggingFaceProvider(apiKey);
         this.outputChannel.appendLine('[AgentManager] API key set');
-        this.initMcpRouter();
+        await this.initMcpRouter();
     }
 
     private async initMcpRouter(): Promise<void> {
@@ -181,8 +219,7 @@ export class AutonomousAgentManager {
         const id = `agent-${Date.now()}-${Math.random().toString(36).substring(2, 15)}`;
         const actualModel = model || this.defaultModel;
 
-        const mcpTools = getUnifiedToolDescription();
-        const systemPrompt = buildAgentSystemPrompt(type, mcpTools);
+        const systemPrompt = buildAgentSystemPrompt(type, '');
 
         const agent: Agent = {
             id,
@@ -286,6 +323,18 @@ export class AutonomousAgentManager {
                 if (agent.status !== 'running') break;
 
                 agent.messages.push({ role: 'assistant', content: response });
+
+                // DEBUG: Log raw response to diagnose tool call format issues (GitHub #13)
+                this.outputChannel.appendLine(`\n[DEBUG] Raw LLM response for ${agentId}:`);
+                this.outputChannel.appendLine(`[DEBUG] Length: ${response.length} chars`);
+                this.outputChannel.appendLine(`[DEBUG] First 500 chars: ${response.substring(0, 500)}`);
+                if (response.includes('```tool')) {
+                    const toolMatch = response.match(/```tool\s*\n?([\s\S]*?)```/);
+                    if (toolMatch) {
+                        this.outputChannel.appendLine(`[DEBUG] Tool block content: ${toolMatch[1]}`);
+                    }
+                }
+                this.outputChannel.appendLine(`[DEBUG] ---\n`);
 
                 const toolParse = this.parseToolCalls(response);
 
@@ -502,18 +551,24 @@ export class AutonomousAgentManager {
 
     private safeParseToolBlock(raw: string): { name: string; params: Record<string, any> } | null {
         const attempts = [raw, this.fixJson(raw)];
-        for (const attempt of attempts) {
+        for (let i = 0; i < attempts.length; i++) {
+            const attempt = attempts[i];
             try {
                 const parsed = JSON.parse(attempt);
                 if (parsed && parsed.name && typeof parsed.name === 'string') {
                     const { name, params, ...rest } = parsed;
                     return { name, params: params || rest || {} };
+                } else {
+                    this.outputChannel.appendLine(`[DEBUG] Parse attempt ${i + 1} succeeded but missing 'name' field`);
                 }
-            } catch {
-                // fall through
+            } catch (error: any) {
+                this.outputChannel.appendLine(`[DEBUG] Parse attempt ${i + 1} failed: ${error.message}`);
+                this.outputChannel.appendLine(`[DEBUG] Attempted to parse: ${attempt.substring(0, 200)}`);
             }
         }
 
+        // Fallback: try to extract name and code manually
+        this.outputChannel.appendLine(`[DEBUG] All JSON parse attempts failed, trying regex extraction`);
         const nameMatch = raw.match(/"name"\s*:\s*"([^"]+)"/);
         const codeMatch = raw.match(/"code"\s*:\s*"([\s\S]+?)(?:"\s*\}|"$)/);
         if (nameMatch) {
@@ -526,24 +581,7 @@ export class AutonomousAgentManager {
 
     private async executeTool(name: string, params: Record<string, any>): Promise<ToolResult> {
         try {
-            if (name === 'execute') {
-                const result = await this.unifiedExecutor.execute(params.code, params.timeout);
-                return {
-                    success: result.success,
-                    output: result.success
-                        ? (typeof result.result === 'object' ? JSON.stringify(result.result, null, 2) : String(result.result ?? 'undefined'))
-                        : '',
-                    error: result.error
-                };
-            }
-
-            if (this.mcpInitialized && this.mcpRouter) {
-                const mcpResult = await this.mcpRouter.callTool(name, params);
-                if (mcpResult.success || !mcpResult.error?.includes('Unknown tool')) {
-                    return mcpResult;
-                }
-            }
-
+            // Handle special commands
             if (name === 'task_complete') {
                 return { success: true, output: params.summary || 'Task completed' };
             }
@@ -552,18 +590,16 @@ export class AutonomousAgentManager {
                 return { success: true, output: `Question: ${params.question}` };
             }
 
-            const allTools: Tool[] = [
-                ...Object.values(TOOLS),
-                ...Object.values(VSCODE_TOOLS),
-                ...Object.values(BROWSER_TOOLS),
-                ...Object.values(GIT_TOOLS)
-            ];
-            const tool = allTools.find(t => t.name === name);
-            if (tool) {
-                return await tool.execute(params, this.workspaceRoot);
+            // All other tools go through MCP router (including local tools)
+            if (!this.mcpInitialized || !this.mcpRouter) {
+                return {
+                    success: false,
+                    output: '',
+                    error: 'MCP not initialized. Tools are not available.'
+                };
             }
 
-            return { success: false, output: '', error: `Unknown tool: ${name}` };
+            return await this.mcpRouter.callTool(name, params);
         } catch (err: any) {
             return { success: false, output: '', error: err.message };
         }
@@ -689,8 +725,5 @@ export class AutonomousAgentManager {
         this.outputChannel.dispose();
         disposeMcpRouter();
         disposeMcpOutputChannel();
-        // UnifiedExecutor.dispose() is async but we're in sync context
-        // Fire and forget - browser cleanup is best-effort
-        this.unifiedExecutor.dispose().catch(() => {});
     }
 }

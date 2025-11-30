@@ -1,12 +1,34 @@
 /**
- * Sandbox Tools Module
- * Wraps the sandbox code execution from UnifiedExecutor
- * Provides a simpler interface for direct tool calling
+ * Sandbox Tools Module [DEPRECATED]
+ * This module is deprecated after the migration to direct MCP tools.
+ * UnifiedExecutor was removed due to security vulnerabilities.
+ * Use MCP tools (local__, filesystem, serena) instead.
  */
 
 import { ToolInfo } from '../../core/interfaces/IToolExecutor';
 import { ToolModule, ToolHandler } from './ToolRegistry';
-import { UnifiedExecutor } from '../../mcp/unified-executor';
+// DEPRECATED: UnifiedExecutor removed due to VM sandbox security vulnerability
+// import { UnifiedExecutor } from '../../mcp/unified-executor';
+
+// Type stub for deprecated UnifiedExecutor
+class UnifiedExecutor {
+    constructor(_workspaceRoot: string, _timeout?: number) {
+        throw new Error('UnifiedExecutor is deprecated due to security vulnerabilities. Use MCP tools instead.');
+    }
+    async execute(_code: string, _timeout?: number): Promise<any> {
+        throw new Error('execute() is deprecated. Use MCP tools instead.');
+    }
+    getSafetyStatus(): any {
+        throw new Error('getSafetyStatus() is deprecated. Use MCP tools instead.');
+    }
+    async createCheckpoint(_name: string): Promise<string> {
+        throw new Error('createCheckpoint() is deprecated.');
+    }
+    async rollback(_checkpoint: string): Promise<boolean> {
+        throw new Error('rollback() is deprecated.');
+    }
+    async dispose(): Promise<void> {}
+}
 
 /**
  * Configuration for sandbox tools
@@ -21,7 +43,8 @@ export interface SandboxToolsConfig {
  * Exposes the execute_code tool that runs arbitrary code in the sandbox
  */
 export function createSandboxToolsModule(config: SandboxToolsConfig): ToolModule {
-    // UnifiedExecutor creates its own guardrails internally
+    // DEPRECATED: This function is no longer functional after UnifiedExecutor removal
+    // Declare executor to satisfy TypeScript, but throw error immediately
     const executor = new UnifiedExecutor(config.workspaceRoot, config.timeout);
 
     const tools = new Map<string, {

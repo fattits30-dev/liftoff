@@ -1,4 +1,11 @@
-# Liftoff Code Review - Fixes Applied
+# Liftoff Code Review - Fixes Applied [DEPRECATED]
+
+**⚠️ This document is outdated. The UnifiedExecutor has been removed.**
+**See MIGRATION_SUMMARY.md for current architecture.**
+
+---
+
+# Original Document (Historical Reference Only)
 
 **Last Updated:** 2024-11-30
 **Status:** TypeScript compiles clean ✅
