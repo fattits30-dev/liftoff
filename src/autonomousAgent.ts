@@ -12,6 +12,7 @@ import { DEFAULT_CLOUD_MODEL_NAME, LIMITS } from './config';
 import { buildAgentSystemPrompt } from './config/prompts';
 import { AgentType, AgentStatus } from './types/agentTypes';
 import { AgentViewProvider } from './agentViewProvider';
+import { LoopDetector } from './collaboration/loopDetector';
 export { AgentType, AgentStatus } from './types/agentTypes';
 
 export interface Agent {
@@ -65,6 +66,9 @@ export class AutonomousAgentManager {
     private agentPanels: Map<string, AgentViewProvider> = new Map();
     private extensionUri: vscode.Uri;
 
+    // Loop detection
+    private loopDetector: LoopDetector = new LoopDetector();
+
     private readonly _onAgentUpdate = new vscode.EventEmitter<Agent>();
     public readonly onAgentUpdate = this._onAgentUpdate.event;
     private readonly _onAgentOutput = new vscode.EventEmitter<{ agentId: string; content: string; type: 'thought' | 'tool' | 'result' | 'error' }>();
@@ -73,6 +77,16 @@ export class AutonomousAgentManager {
     // Event-driven completion
     private readonly _onAgentComplete = new vscode.EventEmitter<{ agentId: string; status: AgentStatus; agent: Agent }>();
     public readonly onAgentComplete = this._onAgentComplete.event;
+
+    // Agent stuck event - fires when loop detected, orchestrator should handle
+    private readonly _onAgentStuck = new vscode.EventEmitter<{
+        agentId: string;
+        agent: Agent;
+        reason: string;
+        evidence: string[];
+        suggestion: string;
+    }>();
+    public readonly onAgentStuck = this._onAgentStuck.event;
 
     // Tool execution events for UI
     private readonly _onToolStart = new vscode.EventEmitter<{ tool: string; params: Record<string, unknown> }>();
@@ -351,6 +365,14 @@ export class AutonomousAgentManager {
                 this.log(agent, `Tool result: success=${result.success}`);
                 agent.toolHistory.push({ tool: call.name, params: call.params, result });
 
+                // Record tool execution for loop detection
+                this.loopDetector.recordToolExecution(agentId, {
+                    name: call.name,
+                    params: call.params,
+                    result,
+                    timestamp: Date.now()
+                });
+
                 const output = result.success
                     ? result.output.substring(0, 50000)
                     : `Error: ${result.error}`;
@@ -368,6 +390,9 @@ export class AutonomousAgentManager {
                 // Lessons system
                 let lessonsHint = '';
                 if (!result.success && result.error) {
+                    // Record error for loop detection
+                    this.loopDetector.recordError(agentId, result.error);
+
                     this.pendingErrors.set(agentId, {
                         error: result.error,
                         context: `${call.name}: ${JSON.stringify(call.params)}`,
@@ -386,6 +411,30 @@ export class AutonomousAgentManager {
                         this.emit(agentId, `\n📚 Learned: "${fixDesc}"`, 'result');
                         this.pendingErrors.delete(agentId);
                     }
+                }
+
+                // Check for loops - intelligent detection
+                const loopCheck = this.loopDetector.detectLoop(agentId);
+                if (loopCheck.isStuck) {
+                    this.emit(agentId, '\n\n🔄 Loop detected!', 'error');
+                    this.emit(agentId, `\nReason: ${loopCheck.reason}`, 'error');
+                    if (loopCheck.evidence) {
+                        loopCheck.evidence.forEach(e => this.emit(agentId, `\n  - ${e}`, 'error'));
+                    }
+                    this.emit(agentId, `\n💡 ${loopCheck.suggestion}`, 'error');
+                    this.emit(agentId, '\n\n📤 Handing back to orchestrator for new approach...', 'tool');
+
+                    // Fire stuck event for orchestrator
+                    this._onAgentStuck.fire({
+                        agentId,
+                        agent,
+                        reason: loopCheck.reason!,
+                        evidence: loopCheck.evidence || [],
+                        suggestion: loopCheck.suggestion!
+                    });
+
+                    agent.status = 'error';
+                    break;
                 }
 
                 if (call.name === 'task_complete') {
@@ -596,6 +645,12 @@ export class AutonomousAgentManager {
             panel.dispose();
             this.agentPanels.delete(id);
         }
+        // Clear loop detection history
+        this.loopDetector.clearAgent(id);
+        // Clean up other maps
+        this.noToolCounts.delete(id);
+        this.pendingErrors.delete(id);
+        this.agentMemories.delete(id);
         // Then remove agent
         this.agents.delete(id);
     }

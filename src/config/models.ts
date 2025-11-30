@@ -66,8 +66,8 @@ export const ORCHESTRATOR_MODEL_PARAMS = {
 // ============================================================================
 
 export const LIMITS = {
-    maxIterations: 100,
-    orchestratorMaxIterations: 50,
+    maxIterations: 500,  // High limit - loop detection will catch stuck agents
+    orchestratorMaxIterations: 100,  // Increased for complex multi-agent tasks
     defaultTimeout: 300000,  // 5 minutes
     testTimeout: 180000,     // 3 minutes
     shellTimeout: 120000,    // 2 minutes

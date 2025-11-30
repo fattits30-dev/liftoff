@@ -6,3 +6,4 @@
 export { AgentMessageBus, getMessageBus, resetMessageBus } from './messageBus';
 export { RetryAnalyzer } from './retryAnalyzer';
 export { AgentCoordinator, AgentCoordinatorConfig } from './agentCoordinator';
+export { LoopDetector, LoopDetectionResult, ToolExecution } from './loopDetector';
