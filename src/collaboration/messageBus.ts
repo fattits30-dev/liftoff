@@ -278,7 +278,7 @@ export class AgentMessageBus extends EventEmitter {
      * Cancel all pending requests
      */
     cancelAllPending(): void {
-        for (const [id, pending] of this.pendingRequests) {
+        for (const [_id, pending] of this.pendingRequests) {
             clearTimeout(pending.timer);
             pending.reject(new Error('Request cancelled'));
         }

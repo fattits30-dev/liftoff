@@ -10,8 +10,8 @@ import {
     Entity,
     EntityField,
     PageRoute,
-    SPEC_QUESTIONS
 } from './types';
+// SPEC_QUESTIONS not used in this file
 
 export class SpecGenerator {
     

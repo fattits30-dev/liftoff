@@ -542,7 +542,7 @@ export type UpdateTables<T extends keyof Database['public']['Tables']> =
             routes.push(`        <Route path="${page.path}" element={<${page.component} />} />`);
         }
 
-        let content = `${imports.join('\n')}
+        const content = `${imports.join('\n')}
 
 function App() {
   return (
@@ -585,7 +585,7 @@ export default App
         const envPath = path.join(dir, '.env');
         validatePath(envPath, this.workspaceRoot);
 
-        let content = `# Supabase Configuration
+        const content = `# Supabase Configuration
 VITE_SUPABASE_URL=${vars.SUPABASE_URL || 'https://your-project.supabase.co'}
 VITE_SUPABASE_ANON_KEY=${vars.SUPABASE_ANON_KEY || 'your-anon-key'}
 `;

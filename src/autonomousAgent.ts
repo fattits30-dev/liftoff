@@ -122,11 +122,11 @@ export class AutonomousAgentManager {
             this.unifiedView.updateAgent(agent);
         });
 
-        this.onToolStart(({ tool, params }) => {
+        this.onToolStart(({ tool: _tool, params: _params }) => {
             // Tool start events are captured via onToolComplete with full data
         });
 
-        this.onToolComplete(({ tool, success, output, duration }) => {
+        this.onToolComplete(({ tool, success, output: _output, duration: _duration }) => {
             // Find which agent executed this tool (most recent active agent)
             for (const [agentId, agent] of this.agents) {
                 if (agent.status === 'running' && agent.toolHistory.length > 0) {
