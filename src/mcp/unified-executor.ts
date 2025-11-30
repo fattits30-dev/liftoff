@@ -601,7 +601,7 @@ function createSandbox(workspaceRoot: string, browserManager: BrowserManager, gu
                     throw new Error('Empty command');
                 }
 
-                const program = args[0].replace(/^["']|["']$/g, ''); // Remove quotes from program
+                const program = args[0]!.replace(/^["']|["']$/g, ''); // Remove quotes from program (! safe: length checked)
                 const programArgs = args.slice(1).map(arg => arg.replace(/^["']|["']$/g, '')); // Remove quotes from args
 
                 try {
@@ -644,7 +644,7 @@ function createSandbox(workspaceRoot: string, browserManager: BrowserManager, gu
                     return Promise.reject(new Error('Empty command'));
                 }
 
-                const program = args[0].replace(/^["']|["']$/g, '');
+                const program = args[0]!.replace(/^["']|["']$/g, ''); // ! safe: length checked
                 const programArgs = args.slice(1).map(arg => arg.replace(/^["']|["']$/g, ''));
 
                 return new Promise((resolve, reject) => {
