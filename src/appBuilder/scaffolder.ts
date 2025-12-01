@@ -12,29 +12,25 @@ import {
     Entity
 } from './types';
 import { ArchitectureGenerator } from './architectureGenerator';
+import { ScaffolderAgent } from './scaffolderAgent';
+import { MainOrchestrator } from '../mainOrchestrator';
 import { validatePath } from '../utils/pathValidator';
 
-export interface TemplateVars {
-    APP_NAME: string;
-    DISPLAY_NAME: string;
-    DESCRIPTION: string;
-    SUPABASE_URL?: string;
-    SUPABASE_ANON_KEY?: string;
-}
-
 export class Scaffolder {
-    private templateDir: string;
     private outputChannel: vscode.OutputChannel;
     private workspaceRoot: string;
+    private mainOrchestrator?: MainOrchestrator;
+    private extensionPath: string;
 
-    constructor(extensionPath: string) {
-        this.templateDir = path.join(extensionPath, 'src', 'appBuilder', 'templates');
+    constructor(extensionPath: string, mainOrchestrator?: MainOrchestrator) {
+        this.extensionPath = extensionPath;
+        this.mainOrchestrator = mainOrchestrator;
         this.outputChannel = vscode.window.createOutputChannel('Liftoff Scaffolder');
         this.workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || process.cwd();
     }
 
     /**
-     * Main scaffold method - creates full project structure
+     * Main scaffold method - creates full project structure using three-tier hybrid approach
      */
     async scaffold(
         targetDir: string,
@@ -49,333 +45,293 @@ export class Scaffolder {
             fs.mkdirSync(targetDir, { recursive: true });
         }
 
-        // 2. Copy base template
-        this.log('Copying base template...');
-        await this.copyTemplate('base', targetDir);
+        // THREE-TIER HYBRID APPROACH:
 
-        // 3. Copy app-type specific template (if exists)
-        const appTypeTemplateDir = path.join(this.templateDir, spec.type);
-        if (fs.existsSync(appTypeTemplateDir)) {
-            this.log(`Copying ${spec.type} template...`);
-            await this.copyTemplate(spec.type, targetDir);
+        // TIER 1: Official CLI Bootstrap (0 tokens, instant, 100% reliable)
+        this.log('TIER 1: Bootstrapping with official CLIs...');
+        await this.bootstrapWithCLI(targetDir, spec);
+        await this.validateBootstrap(targetDir, spec);
+
+        // TIER 2: Template Overlays (0 tokens, instant)
+        this.log('TIER 2: Applying template overlays...');
+        await this.applyTemplateOverlays(targetDir, spec);
+
+        // TIER 3: AI Custom Code (200-400 tokens, 5-15s) - only if orchestrator available
+        if (this.mainOrchestrator) {
+            this.log('TIER 3: Generating custom business logic with AI...');
+            const scaffolderAgent = new ScaffolderAgent(
+                this.mainOrchestrator,
+                targetDir,
+                this.extensionPath
+            );
+            await scaffolderAgent.generateCustomFeatures(spec, architecture);
         }
 
-        // 4. Process template variables
-        this.log('Processing template variables...');
-        const vars: TemplateVars = {
-            APP_NAME: spec.name,
-            DISPLAY_NAME: spec.displayName,
-            DESCRIPTION: spec.description,
-            SUPABASE_URL: spec.supabase?.projectUrl,
-            SUPABASE_ANON_KEY: spec.supabase?.anonKey
-        };
-        await this.processTemplateVars(targetDir, vars);
-
-        // 5. Generate pages from spec
-        this.log('Generating page components...');
-        await this.generatePages(targetDir, spec.pages);
-
-        // 6. Generate database types from entities
+        // Post-processing: Database types and migrations
         this.log('Generating database types...');
         await this.generateDatabaseTypes(targetDir, spec.entities);
 
-        // 7. Generate router with routes
-        this.log('Generating router...');
-        await this.generateRouter(targetDir, spec.pages, spec.features.includes('auth'));
-
-        // 8. Generate Supabase migration SQL
         this.log('Generating database migration...');
         const archGenerator = new ArchitectureGenerator();
         const migrationSQL = archGenerator.generateMigrationSQL(architecture.database);
         await this.writeMigration(targetDir, migrationSQL);
 
-        // 9. Create .env file from example
-        this.log('Creating environment file...');
-        await this.createEnvFile(targetDir, vars);
-
         this.log('Scaffolding complete!');
     }
 
     /**
-     * Copy template directory to target
+     * TIER 1: Bootstrap project with official CLI tools
      */
-    private async copyTemplate(templateName: string, targetDir: string): Promise<void> {
-        const sourceDir = path.join(this.templateDir, templateName);
-        if (!fs.existsSync(sourceDir)) {
-            throw new Error(`Template not found: ${templateName}`);
+    private async bootstrapWithCLI(targetDir: string, spec: AppSpec): Promise<void> {
+        const { frontend, bundler, styling, components } = spec.stack;
+
+        // Choose CLI based on stack
+        if (frontend === 'react' && bundler === 'vite') {
+            this.log('Bootstrapping with Vite + React + TypeScript...');
+            await this.runCommand(
+                `npm create vite@latest ${spec.name} -- --template react-ts`,
+                path.dirname(targetDir)
+            );
+        } else if (frontend === 'react' && bundler === 'turbopack') {
+            this.log('Bootstrapping with Next.js + Turbopack...');
+            await this.runCommand(
+                `npx create-next-app@latest ${spec.name} --typescript --tailwind --app --yes`,
+                path.dirname(targetDir)
+            );
+            // Next.js auto-installs, skip npm install step
+            this.log('✓ CLI Bootstrap complete');
+            return;
+        } else if (frontend === 'vue') {
+            this.log('Bootstrapping with Vue + TypeScript...');
+            await this.runCommand(
+                `npm create vue@latest ${spec.name} -- --typescript --router --yes`,
+                path.dirname(targetDir)
+            );
+        } else if (frontend === 'svelte') {
+            this.log('Bootstrapping with SvelteKit...');
+            await this.runCommand(
+                `npm create svelte@latest ${spec.name} -- --template skeleton --types ts`,
+                path.dirname(targetDir)
+            );
+        } else {
+            // Default fallback to Vite React
+            this.log('Defaulting to Vite + React + TypeScript...');
+            await this.runCommand(
+                `npm create vite@latest ${spec.name} -- --template react-ts`,
+                path.dirname(targetDir)
+            );
         }
 
-        await this.copyDir(sourceDir, targetDir);
-    }
+        // Install base dependencies first
+        this.log('Installing base dependencies...');
+        await this.runCommand('npm install', targetDir);
 
-    /**
-     * Recursively copy directory
-     */
-    private async copyDir(source: string, target: string): Promise<void> {
-        validatePath(target, this.workspaceRoot);
-        if (!fs.existsSync(target)) {
-            fs.mkdirSync(target, { recursive: true });
+        // Initialize Tailwind if needed (and not Next.js which includes it)
+        if (styling === 'tailwind' && bundler !== 'turbopack') {
+            this.log('Installing Tailwind CSS...');
+            await this.runCommand('npm install -D tailwindcss postcss autoprefixer', targetDir);
+            await this.runCommand('npx tailwindcss init -p', targetDir);
         }
 
-        const entries = fs.readdirSync(source, { withFileTypes: true });
+        // Initialize shadcn/ui components
+        if (components === 'shadcn' && styling === 'tailwind') {
+            this.log('Installing shadcn/ui components...');
 
-        for (const entry of entries) {
-            const sourcePath = path.join(source, entry.name);
-            const targetPath = path.join(target, entry.name);
+            // Initialize shadcn/ui with defaults
+            await this.runCommand('npx shadcn-ui@latest init --yes --defaults', targetDir);
 
-            if (entry.isDirectory()) {
-                await this.copyDir(sourcePath, targetPath);
-            } else {
-                // Handle .tmpl files - remove extension
-                let finalTargetPath = targetPath;
-                if (entry.name.endsWith('.tmpl')) {
-                    finalTargetPath = targetPath.replace('.tmpl', '');
-                }
-                validatePath(finalTargetPath, this.workspaceRoot);
-                fs.copyFileSync(sourcePath, finalTargetPath);
-            }
-        }
-    }
-
-    /**
-     * Process template variables in all files
-     */
-    private async processTemplateVars(dir: string, vars: TemplateVars): Promise<void> {
-        const processFile = (filePath: string) => {
-            // Only process text files
-            const textExtensions = ['.ts', '.tsx', '.js', '.jsx', '.json', '.html', '.css', '.md', '.env'];
-            const ext = path.extname(filePath);
-            if (!textExtensions.includes(ext) && !filePath.endsWith('.example')) {
-                return;
-            }
-
-            let content = fs.readFileSync(filePath, 'utf-8');
-            let modified = false;
-
-            // Replace {{VAR}} patterns
-            for (const [key, value] of Object.entries(vars)) {
-                if (value !== undefined) {
-                    const pattern = new RegExp(`\\{\\{${key}\\}\\}`, 'g');
-                    if (pattern.test(content)) {
-                        content = content.replace(pattern, value);
-                        modified = true;
-                    }
-                }
-            }
-
-            if (modified) {
-                validatePath(filePath, this.workspaceRoot);
-                fs.writeFileSync(filePath, content);
-            }
-        };
-
-        const processDir = (dirPath: string) => {
-            const entries = fs.readdirSync(dirPath, { withFileTypes: true });
-            for (const entry of entries) {
-                const fullPath = path.join(dirPath, entry.name);
-                if (entry.isDirectory() && entry.name !== 'node_modules') {
-                    processDir(fullPath);
-                } else if (entry.isFile()) {
-                    processFile(fullPath);
+            // Add essential components
+            const essentialComponents = ['button', 'input', 'card', 'form', 'table', 'toast', 'label'];
+            this.log(`Adding essential components: ${essentialComponents.join(', ')}...`);
+            for (const comp of essentialComponents) {
+                try {
+                    await this.runCommand(`npx shadcn-ui@latest add ${comp} --yes`, targetDir);
+                } catch (error) {
+                    this.log(`Warning: Could not add ${comp} component: ${error}`);
                 }
             }
-        };
+        }
 
-        processDir(dir);
+        this.log('✓ CLI Bootstrap complete');
     }
 
     /**
-     * Generate page components from routes
+     * TIER 2: Apply template overlays (pre-built files with variable replacement)
      */
-    private async generatePages(dir: string, pages: PageRoute[]): Promise<void> {
-        const pagesDir = path.join(dir, 'src', 'pages');
-        validatePath(pagesDir, this.workspaceRoot);
-        if (!fs.existsSync(pagesDir)) {
-            fs.mkdirSync(pagesDir, { recursive: true });
+    private async applyTemplateOverlays(targetDir: string, spec: AppSpec): Promise<void> {
+        this.log('Copying Supabase client template...');
+
+        // Ensure lib directory exists
+        const libDir = path.join(targetDir, 'src', 'lib');
+        if (!fs.existsSync(libDir)) {
+            fs.mkdirSync(libDir, { recursive: true });
         }
 
-        for (const page of pages) {
-            // Skip home page - already in template
-            if (page.path === '/') continue;
+        // Copy Supabase client (pre-built, zero-token template)
+        const supabaseTemplate = `import { createClient } from '@supabase/supabase-js';
 
-            const componentName = page.component;
-            const filePath = path.join(pagesDir, `${componentName}.tsx`);
+const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
+const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
 
-            // Don't overwrite existing
-            if (fs.existsSync(filePath)) continue;
-
-            const content = this.generatePageComponent(page);
-            validatePath(filePath, this.workspaceRoot);
-            fs.writeFileSync(filePath, content);
-        }
-    }
-
-    /**
-     * Generate a single page component
-     */
-    private generatePageComponent(page: PageRoute): string {
-        const isAuthPage = ['LoginPage', 'SignupPage', 'ForgotPasswordPage'].includes(page.component);
-        const isDashboardPage = page.layout === 'dashboard';
-
-        if (isAuthPage) {
-            return this.generateAuthPageTemplate(page);
-        }
-
-        if (isDashboardPage) {
-            return this.generateDashboardPageTemplate(page);
-        }
-
-        return `import { Link } from 'react-router-dom'
-import { Button } from '@/components/ui/button'
-
-export default function ${page.component}() {
-  return (
-    <div className="container mx-auto px-4 py-8">
-      <h1 className="text-3xl font-bold mb-4">${page.title || page.name}</h1>
-      <p className="text-muted-foreground">
-        This is the ${page.name} page.
-      </p>
-      <div className="mt-4">
-        <Link to="/">
-          <Button variant="outline">Back to Home</Button>
-        </Link>
-      </div>
-    </div>
-  )
+if (!supabaseUrl || !supabaseAnonKey) {
+  throw new Error('Missing Supabase environment variables');
 }
+
+export const supabase = createClient(supabaseUrl, supabaseAnonKey);
 `;
-    }
+        const supabasePath = path.join(libDir, 'supabase.ts');
+        validatePath(supabasePath, this.workspaceRoot);
+        fs.writeFileSync(supabasePath, supabaseTemplate);
 
-    /**
-     * Generate auth page template
-     */
-    private generateAuthPageTemplate(page: PageRoute): string {
-        const isLogin = page.component === 'LoginPage';
-        const isSignup = page.component === 'SignupPage';
+        // Copy auth hook if auth feature enabled
+        if (spec.features.includes('auth')) {
+            this.log('Copying auth hook template...');
+            const hooksDir = path.join(targetDir, 'src', 'hooks');
+            if (!fs.existsSync(hooksDir)) {
+                fs.mkdirSync(hooksDir, { recursive: true });
+            }
 
-        return `import { useState } from 'react'
-import { Link, useNavigate } from 'react-router-dom'
-import { useAuth } from '@/hooks/useAuth'
-import { Button } from '@/components/ui/button'
-import { Input } from '@/components/ui/input'
-import { Label } from '@/components/ui/label'
-import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from '@/components/ui/card'
-import { useToast } from '@/components/ui/use-toast'
+            const authHookTemplate = `import { useState, useEffect, createContext, useContext, ReactNode } from 'react';
+import { supabase } from '@/lib/supabase';
+import { User, Session } from '@supabase/supabase-js';
 
-export default function ${page.component}() {
-  const [email, setEmail] = useState('')
-  const [password, setPassword] = useState('')
-  ${isSignup ? "const [confirmPassword, setConfirmPassword] = useState('')" : ''}
-  const [loading, setLoading] = useState(false)
-  const { ${isLogin ? 'signIn' : 'signUp'} } = useAuth()
-  const navigate = useNavigate()
-  const { toast } = useToast()
+interface AuthContextType {
+  user: User | null;
+  session: Session | null;
+  loading: boolean;
+  signIn: (email: string, password: string) => Promise<void>;
+  signUp: (email: string, password: string) => Promise<void>;
+  signOut: () => Promise<void>;
+}
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault()
-    ${isSignup ? `
-    if (password !== confirmPassword) {
-      toast({ title: 'Error', description: 'Passwords do not match', variant: 'destructive' })
-      return
-    }` : ''}
+const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
-    setLoading(true)
-    try {
-      await ${isLogin ? 'signIn' : 'signUp'}(email, password)
-      ${isLogin ? "navigate('/dashboard')" : "toast({ title: 'Success', description: 'Check your email to confirm your account' })"}
-    } catch (error: any) {
-      toast({ title: 'Error', description: error.message, variant: 'destructive' })
-    } finally {
-      setLoading(false)
-    }
+export function AuthProvider({ children }: { children: ReactNode }) {
+  const [user, setUser] = useState<User | null>(null);
+  const [session, setSession] = useState<Session | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    // Get initial session
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      setSession(session);
+      setUser(session?.user ?? null);
+      setLoading(false);
+    });
+
+    // Listen for auth changes
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange((_event, session) => {
+      setSession(session);
+      setUser(session?.user ?? null);
+    });
+
+    return () => subscription.unsubscribe();
+  }, []);
+
+  const signIn = async (email: string, password: string) => {
+    const { error } = await supabase.auth.signInWithPassword({ email, password });
+    if (error) throw error;
+  };
+
+  const signUp = async (email: string, password: string) => {
+    const { error } = await supabase.auth.signUp({ email, password });
+    if (error) throw error;
+  };
+
+  const signOut = async () => {
+    const { error } = await supabase.auth.signOut();
+    if (error) throw error;
+  };
+
+  return (
+    <AuthContext.Provider value={{ user, session, loading, signIn, signUp, signOut }}>
+      {children}
+    </AuthContext.Provider>
+  );
+}
+
+export function useAuth() {
+  const context = useContext(AuthContext);
+  if (context === undefined) {
+    throw new Error('useAuth must be used within an AuthProvider');
   }
-
-  return (
-    <div className="min-h-screen flex items-center justify-center px-4">
-      <Card className="w-full max-w-md">
-        <CardHeader>
-          <CardTitle>${isLogin ? 'Sign In' : 'Create Account'}</CardTitle>
-          <CardDescription>
-            ${isLogin ? 'Enter your credentials to access your account' : 'Enter your details to create an account'}
-          </CardDescription>
-        </CardHeader>
-        <form onSubmit={handleSubmit}>
-          <CardContent className="space-y-4">
-            <div className="space-y-2">
-              <Label htmlFor="email">Email</Label>
-              <Input
-                id="email"
-                type="email"
-                placeholder="you@example.com"
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                required
-              />
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="password">Password</Label>
-              <Input
-                id="password"
-                type="password"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                required
-              />
-            </div>
-            ${isSignup ? `<div className="space-y-2">
-              <Label htmlFor="confirmPassword">Confirm Password</Label>
-              <Input
-                id="confirmPassword"
-                type="password"
-                value={confirmPassword}
-                onChange={(e) => setConfirmPassword(e.target.value)}
-                required
-              />
-            </div>` : ''}
-          </CardContent>
-          <CardFooter className="flex flex-col gap-4">
-            <Button type="submit" className="w-full" disabled={loading}>
-              {loading ? 'Loading...' : '${isLogin ? 'Sign In' : 'Sign Up'}'}
-            </Button>
-            <p className="text-sm text-muted-foreground">
-              ${isLogin ? "Don't have an account? " : 'Already have an account? '}
-              <Link to="${isLogin ? '/signup' : '/login'}" className="text-primary hover:underline">
-                ${isLogin ? 'Sign up' : 'Sign in'}
-              </Link>
-            </p>
-          </CardFooter>
-        </form>
-      </Card>
-    </div>
-  )
+  return context;
 }
 `;
+            const authHookPath = path.join(hooksDir, 'useAuth.tsx');
+            validatePath(authHookPath, this.workspaceRoot);
+            fs.writeFileSync(authHookPath, authHookTemplate);
+        }
+
+        // Create .env template
+        this.log('Creating .env template...');
+        const envTemplate = `# App Configuration
+VITE_APP_NAME=${spec.name}
+
+# Supabase
+VITE_SUPABASE_URL=your-project-url
+VITE_SUPABASE_ANON_KEY=your-anon-key
+`;
+        const envPath = path.join(targetDir, '.env.example');
+        validatePath(envPath, this.workspaceRoot);
+        fs.writeFileSync(envPath, envTemplate);
+
+        // Install Supabase dependency
+        this.log('Installing @supabase/supabase-js...');
+        await this.runCommand('npm install @supabase/supabase-js', targetDir);
+
+        this.log('✓ Template overlays applied');
     }
 
     /**
-     * Generate dashboard page template
+     * Validate that CLI bootstrap succeeded
      */
-    private generateDashboardPageTemplate(page: PageRoute): string {
-        return `import { useAuth } from '@/hooks/useAuth'
+    private async validateBootstrap(targetDir: string, spec: AppSpec): Promise<void> {
+        this.log('Validating bootstrap...');
 
-export default function ${page.component}() {
-  const { user } = useAuth()
+        const requiredFiles = [
+            'package.json',
+            'tsconfig.json',
+            'src/main.tsx',
+            'index.html'
+        ];
 
-  return (
-    <div className="p-6">
-      <h1 className="text-3xl font-bold mb-6">${page.title || page.name}</h1>
-      <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
-        <div className="rounded-lg border bg-card p-6">
-          <h3 className="text-sm font-medium text-muted-foreground">Welcome</h3>
-          <p className="text-2xl font-bold">{user?.email}</p>
-        </div>
-        {/* Add more dashboard cards here */}
-      </div>
-    </div>
-  )
-}
-`;
+        // Add bundler-specific files
+        if (spec.stack.bundler === 'vite' || !spec.stack.bundler) {
+            requiredFiles.push('vite.config.ts');
+        }
+
+        // Check required files exist
+        for (const file of requiredFiles) {
+            const filePath = path.join(targetDir, file);
+            if (!fs.existsSync(filePath)) {
+                throw new Error(`Bootstrap failed: ${file} not found. CLI may have failed.`);
+            }
+        }
+
+        // Verify package.json has required dependencies
+        const packageJsonPath = path.join(targetDir, 'package.json');
+        const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, 'utf-8'));
+
+        const requiredDeps = ['react', 'react-dom'];
+        for (const dep of requiredDeps) {
+            if (!packageJson.dependencies?.[dep] && !packageJson.devDependencies?.[dep]) {
+                throw new Error(`Bootstrap incomplete: ${dep} not installed`);
+            }
+        }
+
+        this.log('✓ Bootstrap validation passed');
     }
+
+
+
+
+
+
+
+
 
     /**
      * Generate database types from entities
@@ -514,52 +470,6 @@ export type UpdateTables<T extends keyof Database['public']['Tables']> =
         return typeMap[fieldType] || 'unknown';
     }
 
-    /**
-     * Generate React Router configuration
-     */
-    private async generateRouter(dir: string, pages: PageRoute[], hasAuth: boolean): Promise<void> {
-        const appPath = path.join(dir, 'src', 'App.tsx');
-        validatePath(appPath, this.workspaceRoot);
-
-        // Build imports
-        const imports: string[] = [
-            "import { Routes, Route } from 'react-router-dom'",
-            "import { Toaster } from '@/components/ui/toaster'"
-        ];
-
-        if (hasAuth) {
-            imports.push("import { AuthProvider } from '@/hooks/useAuth'");
-        }
-
-        // Import all pages
-        for (const page of pages) {
-            imports.push(`import ${page.component} from '@/pages/${page.component}'`);
-        }
-
-        // Build routes
-        const routes: string[] = [];
-        for (const page of pages) {
-            routes.push(`        <Route path="${page.path}" element={<${page.component} />} />`);
-        }
-
-        const content = `${imports.join('\n')}
-
-function App() {
-  return (
-    ${hasAuth ? '<AuthProvider>' : '<>'}
-      <Routes>
-${routes.join('\n')}
-      </Routes>
-      <Toaster />
-    ${hasAuth ? '</AuthProvider>' : '</>'}
-  )
-}
-
-export default App
-`;
-
-        fs.writeFileSync(appPath, content);
-    }
 
     /**
      * Write migration SQL file
@@ -578,20 +488,6 @@ export default App
         fs.writeFileSync(filePath, sql);
     }
 
-    /**
-     * Create .env file from template vars
-     */
-    private async createEnvFile(dir: string, vars: TemplateVars): Promise<void> {
-        const envPath = path.join(dir, '.env');
-        validatePath(envPath, this.workspaceRoot);
-
-        const content = `# Supabase Configuration
-VITE_SUPABASE_URL=${vars.SUPABASE_URL || 'https://your-project.supabase.co'}
-VITE_SUPABASE_ANON_KEY=${vars.SUPABASE_ANON_KEY || 'your-anon-key'}
-`;
-
-        fs.writeFileSync(envPath, content);
-    }
 
     /**
      * Log message to output channel
