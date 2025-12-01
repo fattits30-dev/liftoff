@@ -23,6 +23,20 @@ let thoughtBuffer = '';
 let thoughtTimer = null;
 const THOUGHT_FLUSH_MS = 120;
 
+// Phase tracking for App Builder
+let currentPhase = null;
+let phaseStartTime = null;
+
+// Phase metadata
+const PHASES = {
+    'spec': { icon: '📋', name: 'Specification', color: '#3b82f6' },
+    'architecture': { icon: '🏗️', name: 'Architecture', color: '#8b5cf6' },
+    'scaffold': { icon: '⚡', name: 'Scaffolding', color: '#10b981' },
+    'implement': { icon: '💻', name: 'Implementation', color: '#f59e0b' },
+    'test': { icon: '🧪', name: 'Testing', color: '#ec4899' },
+    'deploy': { icon: '🚀', name: 'Deployment', color: '#06b6d4' }
+};
+
 // ============================================================================
 // Tool Categories
 // ============================================================================
@@ -161,6 +175,142 @@ function escapeHtml(text) {
     return div.innerHTML;
 }
 
+// ============================================================================
+// Phase Management Functions
+// ============================================================================
+
+function updatePhaseView(phase) {
+    if (phase !== currentPhase) {
+        // Complete previous phase
+        if (currentPhase) {
+            const duration = Date.now() - phaseStartTime;
+            markPhaseComplete(currentPhase, duration);
+        }
+
+        // Start new phase
+        currentPhase = phase;
+        phaseStartTime = Date.now();
+        createPhaseSection(phase);
+    }
+}
+
+function createPhaseSection(phase) {
+    const meta = PHASES[phase];
+    if (!meta) return;
+
+    const section = document.createElement('div');
+    section.className = 'phase-section active';
+    section.id = `phase-${phase}`;
+    section.innerHTML = `
+        <div class="phase-header" onclick="togglePhase('${phase}')">
+            <span class="phase-icon">${meta.icon}</span>
+            <span class="phase-name">${meta.name}</span>
+            <span class="phase-status">In Progress...</span>
+            <span class="phase-toggle">▼</span>
+        </div>
+        <div class="phase-content">
+            <div class="file-tree" id="files-${phase}"></div>
+            <div class="task-list" id="tasks-${phase}"></div>
+            <div class="phase-logs" id="logs-${phase}"></div>
+        </div>
+    `;
+
+    // Add to output container (create if doesn't exist)
+    let outputContainer = document.getElementById('phase-output-container');
+    if (!outputContainer) {
+        outputContainer = document.createElement('div');
+        outputContainer.id = 'phase-output-container';
+        outputContainer.className = 'phase-output-container';
+
+        // Insert into terminal output area
+        const terminalContent = document.getElementById('terminalContent');
+        if (terminalContent) {
+            terminalContent.parentNode.insertBefore(outputContainer, terminalContent);
+        }
+    }
+
+    outputContainer.appendChild(section);
+}
+
+function markPhaseComplete(phase, duration) {
+    const section = document.getElementById(`phase-${phase}`);
+    if (!section) return;
+
+    section.classList.remove('active');
+    section.classList.add('completed');
+
+    const statusEl = section.querySelector('.phase-status');
+    if (statusEl) {
+        statusEl.textContent = `Completed in ${formatDuration(duration)}`;
+    }
+}
+
+function togglePhase(phase) {
+    const section = document.getElementById(`phase-${phase}`);
+    if (!section) return;
+
+    const content = section.querySelector('.phase-content');
+    const toggle = section.querySelector('.phase-toggle');
+
+    if (content.style.display === 'none') {
+        content.style.display = 'block';
+        toggle.textContent = '▼';
+    } else {
+        content.style.display = 'none';
+        toggle.textContent = '▶';
+    }
+}
+
+function addToFileTree(phase, filePath) {
+    const tree = document.getElementById(`files-${phase}`);
+    if (!tree) return;
+
+    const item = document.createElement('div');
+    item.className = 'file-item';
+    item.innerHTML = `
+        <span class="file-icon">📄</span>
+        <span class="file-path">${escapeHtml(filePath)}</span>
+        <span class="file-status">✓</span>
+    `;
+    tree.appendChild(item);
+}
+
+function updateTaskInPhase(phase, task) {
+    const taskList = document.getElementById(`tasks-${phase}`);
+    if (!taskList) return;
+
+    let taskItem = taskList.querySelector(`[data-task="${task.name}"]`);
+
+    if (!taskItem) {
+        taskItem = document.createElement('div');
+        taskItem.className = 'task-item';
+        taskItem.setAttribute('data-task', task.name);
+        taskList.appendChild(taskItem);
+    }
+
+    const statusIcon = task.status === 'completed' ? '✅' :
+                      task.status === 'error' ? '❌' :
+                      task.status === 'running' ? '⏳' : '⭕';
+
+    taskItem.innerHTML = `
+        <span class="task-status">${statusIcon}</span>
+        <span class="task-name">${escapeHtml(task.name)}</span>
+    `;
+}
+
+function addLogToPhase(phase, content) {
+    const logs = document.getElementById(`logs-${phase}`);
+    if (!logs) return;
+
+    const logLine = document.createElement('div');
+    logLine.className = 'log-line';
+    logLine.textContent = content;
+    logs.appendChild(logLine);
+
+    // Auto-scroll
+    logs.scrollTop = logs.scrollHeight;
+}
+
 function renderMarkdown(text) {
     if (!text) return '';
     let html = escapeHtml(text);
@@ -224,7 +374,31 @@ function flushThoughtBuffer() {
     const nearBottom = thought.parentElement?.parentElement?.scrollHeight
         ? (thought.parentElement.parentElement.scrollHeight - thought.parentElement.parentElement.scrollTop - thought.parentElement.parentElement.clientHeight < 120)
         : true;
-    thought.innerHTML += escapeHtml(thoughtBuffer);
+
+    // Split buffer into lines and create separate blocks for visual breaks
+    const lines = thoughtBuffer.split('\n');
+    for (const line of lines) {
+        if (line.trim()) {
+            // Create separate div for each significant line
+            if (line.includes('---') || line.includes('Iteration') || line.includes('💭') || line.includes('🔧')) {
+                const separator = document.createElement('div');
+                separator.className = 'thought-separator';
+                separator.style.cssText = 'margin: 12px 0; padding: 8px; background: rgba(100,149,237,0.1); border-left: 3px solid #6495ED; font-weight: 600;';
+                separator.innerHTML = escapeHtml(line);
+                thought.appendChild(separator);
+            } else {
+                const p = document.createElement('p');
+                p.style.cssText = 'margin: 8px 0; line-height: 1.6;';
+                p.innerHTML = escapeHtml(line);
+                thought.appendChild(p);
+            }
+        } else if (line === '') {
+            // Preserve intentional line breaks
+            const br = document.createElement('br');
+            thought.appendChild(br);
+        }
+    }
+
     thoughtBuffer = '';
     thoughtTimer = null;
     if (nearBottom) {
@@ -691,7 +865,21 @@ window.addEventListener('message', e => {
                               msg.outputType === 'tool' ? '🔧 ' :
                               msg.outputType === 'result' ? '📋 ' :
                               msg.outputType === 'error' ? '❌ ' : '';
-                addTerminalLine(outputType, prefix + msg.content.substring(0, 1000));
+
+                // Split long output into lines and add each separately
+                const lines = msg.content.split('\n');
+                for (const line of lines) {
+                    if (line.trim()) {  // Skip empty lines
+                        // Check for duplicate (same content in last 5 entries)
+                        const recentOutput = terminalOutput.slice(-5);
+                        const isDuplicate = recentOutput.some(entry =>
+                            entry.content === prefix + line
+                        );
+                        if (!isDuplicate) {
+                            addTerminalLine(outputType, prefix + line);
+                        }
+                    }
+                }
                 updateStats();
                 // Highlight Output tab when new content arrives
                 document.getElementById('tabTerminal').classList.add('has-activity');
@@ -732,6 +920,27 @@ window.addEventListener('message', e => {
                     renderAgents();
                     updateStats();
                 }
+            }
+            break;
+
+        case 'phaseUpdate':
+            // App Builder phase change
+            if (msg.phase) {
+                updatePhaseView(msg.phase);
+            }
+            break;
+
+        case 'fileCreated':
+            // File created in current phase
+            if (msg.path && currentPhase) {
+                addToFileTree(currentPhase, msg.path);
+            }
+            break;
+
+        case 'taskUpdate':
+            // Task status update in current phase
+            if (msg.task && currentPhase) {
+                updateTaskInPhase(currentPhase, msg.task);
             }
             break;
 
