@@ -11,11 +11,64 @@ import { MainOrchestrator } from '../mainOrchestrator';
 import { AppSpec, Architecture } from './types';
 
 export class ScaffolderAgent {
+    private readonly MAX_RETRIES = 3;
+    private readonly RETRY_DELAY_MS = 2000;
+
     constructor(
         private orchestrator: MainOrchestrator,
         private targetDir: string,
         private extensionPath: string
     ) {}
+
+    /**
+     * Helper method to delegate task with automatic retries
+     */
+    private async delegateWithRetry(
+        agent: 'frontend' | 'backend',
+        task: string,
+        context: string
+    ): Promise<string> {
+        let lastError: string | undefined;
+
+        for (let attempt = 1; attempt <= this.MAX_RETRIES; attempt++) {
+            try {
+                console.log(`[ScaffolderAgent] ${context} (attempt ${attempt}/${this.MAX_RETRIES})`);
+
+                const result = await this.orchestrator.delegateTask(agent, task);
+
+                if (result.success && result.message) {
+                    const content = this.extractCodeBlock(result.message);
+
+                    // Validate we got actual code content
+                    if (!content || content.trim().length < 50) {
+                        throw new Error(`Invalid code generated: content too short (${content.length} chars)`);
+                    }
+
+                    console.log(`[ScaffolderAgent] ✓ ${context} completed successfully`);
+                    return content;
+                }
+
+                // Failed - prepare for retry
+                lastError = result.error || 'Unknown error';
+                console.log(`[ScaffolderAgent] ✗ ${context} failed: ${lastError}`);
+
+                if (attempt < this.MAX_RETRIES) {
+                    console.log(`[ScaffolderAgent] Waiting ${this.RETRY_DELAY_MS}ms before retry...`);
+                    await new Promise(resolve => setTimeout(resolve, this.RETRY_DELAY_MS));
+                }
+            } catch (error) {
+                lastError = error instanceof Error ? error.message : String(error);
+                console.log(`[ScaffolderAgent] ✗ ${context} exception: ${lastError}`);
+
+                if (attempt < this.MAX_RETRIES) {
+                    await new Promise(resolve => setTimeout(resolve, this.RETRY_DELAY_MS));
+                }
+            }
+        }
+
+        // All retries exhausted
+        throw new Error(`Failed to generate ${context} after ${this.MAX_RETRIES} attempts. Last error: ${lastError}`);
+    }
 
     /**
      * Generate custom business logic (TIER 3)
@@ -148,8 +201,11 @@ export function ${entityName}ListPage() {
 
 Output ONLY the complete component code.`;
 
-        const result = await this.orchestrator.delegateTask('frontend', prompt);
-        const content = this.extractCodeBlock(result.message || '');
+        const content = await this.delegateWithRetry(
+            'frontend',
+            prompt,
+            `Generate ${entityName} list page`
+        );
 
         await fs.writeFile(
             path.join(this.targetDir, `src/pages/${entityName}ListPage.tsx`),
@@ -247,8 +303,11 @@ export function ${entityName}FormPage() {
 
 Output ONLY the complete component code.`;
 
-        const result = await this.orchestrator.delegateTask('frontend', prompt);
-        const content = this.extractCodeBlock(result.message || '');
+        const content = await this.delegateWithRetry(
+            'frontend',
+            prompt,
+            `Generate ${entityName} form page`
+        );
 
         await fs.writeFile(
             path.join(this.targetDir, `src/pages/${entityName}FormPage.tsx`),
@@ -304,8 +363,12 @@ Requirements:
 
 Output ONLY the file content, no explanations.`;
 
-            const result = await this.orchestrator.delegateTask('frontend', prompt);
-            const content = this.extractCodeBlock(result.message || '');
+            const content = await this.delegateWithRetry(
+                'frontend',
+                prompt,
+                `Generate ${layout} layout`
+            );
+
             await fs.writeFile(
                 path.join(this.targetDir, `src/layouts/${layout}Layout.tsx`),
                 content,
