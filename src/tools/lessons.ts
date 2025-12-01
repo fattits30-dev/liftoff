@@ -53,6 +53,8 @@ export class LessonsManager {
             }
             fs.writeFileSync(this.filePath, JSON.stringify(this.db, null, 2));
         } catch (e) {
+            // Silently fail - lessons are optional, don't crash the agent
+            // Common issue: .liftoff directory doesn't exist in new projects
             console.error('Failed to save lessons:', e);
         }
     }

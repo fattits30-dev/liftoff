@@ -21,7 +21,9 @@ let totalRemoved = 0;
 let orchestratorState = 'Ready';
 let thoughtBuffer = '';
 let thoughtTimer = null;
+let thoughtWatchdog = null;
 const THOUGHT_FLUSH_MS = 120;
+const THOUGHT_TIMEOUT_MS = 30000; // 30 seconds - auto-clear stuck thinking
 
 // Phase tracking for App Builder
 let currentPhase = null;
@@ -367,6 +369,27 @@ function toggleThinking() {
     thoughts.forEach(thought => {
         thought.style.display = showThinking ? 'block' : 'none';
     });
+}
+
+function forceEndThinking() {
+    // Force end thinking state (called by watchdog on timeout)
+    isThinking = false;
+    setStatus('', 'Ready');
+    thoughtBuffer = '';
+    if (thoughtTimer) {
+        clearTimeout(thoughtTimer);
+        thoughtTimer = null;
+    }
+    if (thoughtWatchdog) {
+        clearTimeout(thoughtWatchdog);
+        thoughtWatchdog = null;
+    }
+    const el = document.getElementById('currentThought');
+    if (el && el.textContent) {
+        const content = el.textContent.replace('Thinking...', '').trim();
+        if (content) messages.push({ role: 'assistant', content, timestamp: Date.now() });
+    }
+    renderMessages();
 }
 
 function setStatus(status, text) {
@@ -820,6 +843,10 @@ window.addEventListener('message', e => {
                 clearTimeout(thoughtTimer);
                 thoughtTimer = null;
             }
+            if (thoughtWatchdog) {
+                clearTimeout(thoughtWatchdog);
+                thoughtWatchdog = null;
+            }
             const el = document.getElementById('currentThought');
             if (el && el.textContent) {
                 const content = el.textContent.replace('Thinking...', '').trim();
@@ -852,6 +879,12 @@ window.addEventListener('message', e => {
             if (!thoughtTimer) {
                 thoughtTimer = setTimeout(flushThoughtBuffer, THOUGHT_FLUSH_MS);
             }
+            // Reset watchdog - we're still receiving thinking content
+            if (thoughtWatchdog) clearTimeout(thoughtWatchdog);
+            thoughtWatchdog = setTimeout(() => {
+                console.warn('[UI] Thinking watchdog triggered - force ending stuck thinking state');
+                forceEndThinking();
+            }, THOUGHT_TIMEOUT_MS);
             break;
             
         case 'toolStart':
