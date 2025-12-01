@@ -335,7 +335,7 @@ export class AutonomousAgentManager {
                     for await (const chunk of this.llmProvider.streamChat(
                         agent.model,
                         agent.messages,
-                        { maxTokens: 2048, temperature: 0.2, thinking: true }
+                        { maxTokens: 32768, temperature: 0.2, thinking: true }
                     )) {
                         if (agent.abortController?.signal.aborted) {
                             this.log(agent, 'Aborted during streaming');
