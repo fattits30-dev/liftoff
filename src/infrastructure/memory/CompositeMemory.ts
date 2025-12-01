@@ -4,7 +4,7 @@
  * Routes operations to appropriate backend stores based on type
  */
 
-import { v4 as uuidv4 } from 'uuid';
+import { v4 as _uuidv4 } from 'uuid';
 import {
     IMemoryStore,
     MemoryEntry,

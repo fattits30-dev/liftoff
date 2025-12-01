@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 import { MainOrchestrator } from './mainOrchestrator';
-import { IAgentManager, IAgent, AgentType } from './types';
+import { IAgentManager, IAgent } from './types';
 import { getWebviewHtml } from './webview';
 
 /**

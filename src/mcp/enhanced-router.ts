@@ -7,7 +7,7 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
 import { McpClient } from './client';
-import { McpServerManager, ServerConfig, ServerHealth } from './server-manager';
+import { McpServerManager, ServerHealth } from './server-manager';
 import { LocalMcpServer, McpToolResult } from './local-server';
 import { IEventBus } from '../core/interfaces/IEventBus';
 import { McpServerConfig, McpTool, ToolCallResult } from './types';

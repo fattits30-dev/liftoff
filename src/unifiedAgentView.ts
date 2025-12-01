@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { Agent, AgentStatus } from './autonomousAgent';
+import { Agent } from './autonomousAgent';
 
 /**
  * Unified Agent View - Single panel showing ALL agents with tabs
@@ -847,7 +847,7 @@ export class UnifiedAgentView {
                 .replace(/>/g, '&gt;')
                 .replace(/"([^"]+)":/g, '<span class="hl-key">"$1"</span>:')
                 .replace(/: "([^"]*)"/g, ': <span class="hl-string">"$1"</span>')
-                .replace(/: (-?\d+\.?\d*)/g, ': <span class="hl-number">$1</span>')
+                .replace(/: (-?[0-9]+[.]?[0-9]*)/g, ': <span class="hl-number">$1</span>')
                 .replace(/: (true|false)/g, ': <span class="hl-boolean">$1</span>')
                 .replace(/: null/g, ': <span class="hl-null">null</span>');
         }

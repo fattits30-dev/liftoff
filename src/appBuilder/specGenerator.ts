@@ -169,7 +169,7 @@ export class SpecGenerator {
             const displayName = this.toTitleCase(appName);
 
             // Hosting - default to vercel, user rarely cares about this upfront
-            const hosting = 'vercel';
+            const _hosting = 'vercel';
 
             // Research and decide stack using AI + Context7
             const stack = await this.researchStack(description, inferredType, inferredFeatures);
@@ -214,7 +214,7 @@ export class SpecGenerator {
      * Infer app name from description
      */
     private inferAppName(description: string): string {
-        const desc = description.toLowerCase();
+        const _desc = description.toLowerCase();
 
         // Look for "build a X" or "create a X" patterns
         const patterns = [
@@ -712,15 +712,20 @@ export class SpecGenerator {
             };
         }
 
-        // Delegate stack research to orchestrator with Context7
-        const researchPrompt = `Analyze this app and research the BEST modern tech stack using Context7:
+        // Delegate stack research to orchestrator
+        const researchPrompt = `Analyze this app and recommend the BEST modern tech stack:
 
 App Description: ${description}
 App Type: ${appType}
 Required Features: ${features.join(', ')}
 
+IMPORTANT:
+- This is RESEARCH ONLY - do NOT write any files. Just return the JSON response.
+- Use any available research tools (Context7, web search, etc.) or your knowledge
+- If tools are unavailable, proceed with your best judgment based on current best practices
+
 Tasks:
-1. Use Context7 to research current best practices for:
+1. Research or recall current best practices for:
    - Frontend frameworks (React, Vue, Svelte, Solid, etc.)
    - Bundlers (Vite, Turbopack, etc.)
    - Styling (Tailwind, styled-components, etc.)
@@ -731,7 +736,7 @@ Tasks:
 2. Analyze the app requirements and recommend the BEST stack for this specific use case
 3. Provide clear rationale for each choice
 
-Output ONLY a JSON object with this structure:
+Output ONLY a JSON object with this structure (NO FILES):
 {
   "frontend": "chosen-framework",
   "bundler": "chosen-bundler",

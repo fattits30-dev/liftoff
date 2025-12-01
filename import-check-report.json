@@ -1,0 +1,113 @@
+{
+  "unused_imports": [
+    {
+      "file": "src\\appBuilder\\appBuilderOrchestrator.ts",
+      "unused": [
+        "Button from '@/components/ui/button'",
+        "Input from '@/components/ui/input'"
+      ]
+    },
+    {
+      "file": "src\\appBuilder\\scaffolderAgent.ts",
+      "unused": [
+        "TableHead from '@/components/ui/table'",
+        "TableCell from '@/components/ui/table'",
+        "Label from '@/components/ui/label'"
+      ]
+    },
+    {
+      "file": "src\\collaboration\\agentCoordinator.ts",
+      "unused": [
+        "v4 from 'uuid'"
+      ]
+    },
+    {
+      "file": "src\\collaboration\\messageBus.ts",
+      "unused": [
+        "v4 from 'uuid'"
+      ]
+    },
+    {
+      "file": "src\\core\\entities\\Memory.ts",
+      "unused": [
+        "v4 from 'uuid'"
+      ]
+    },
+    {
+      "file": "src\\infrastructure\\memory\\CompositeMemory.ts",
+      "unused": [
+        "v4 from 'uuid'"
+      ]
+    },
+    {
+      "file": "src\\infrastructure\\memory\\InMemoryStore.ts",
+      "unused": [
+        "v4 from 'uuid'"
+      ]
+    },
+    {
+      "file": "src\\infrastructure\\memory\\JsonMemoryStore.ts",
+      "unused": [
+        "v4 from 'uuid'"
+      ]
+    },
+    {
+      "file": "src\\testing\\testGenerator.ts",
+      "unused": [
+        "beforeAll from '${this.framework}'",
+        "afterAll from '${this.framework}'"
+      ]
+    }
+  ],
+  "duplicate_imports": [
+    {
+      "file": "src\\appBuilder\\appBuilderOrchestrator.ts",
+      "duplicates": [
+        "supabase from '@/lib/supabase'",
+        "useAuth from '@/hooks/useAuth'",
+        "useState from 'react'",
+        "useEffect from 'react'"
+      ]
+    },
+    {
+      "file": "src\\appBuilder\\scaffolderAgent.ts",
+      "duplicates": [
+        "supabase from '@/lib/supabase'",
+        "useState from 'react'",
+        "useEffect from 'react'",
+        "Button from '@/components/ui/button'"
+      ]
+    },
+    {
+      "file": "src\\testing\\testGenerator.ts",
+      "duplicates": [
+        "describe from '${this.framework}'",
+        "it from '${this.framework}'",
+        "expect from '${this.framework}'",
+        "describe from '${this.framework}'",
+        "it from '${this.framework}'",
+        "expect from '${this.framework}'",
+        "test from '@playwright/test'",
+        "expect from '@playwright/test'",
+        "test from '@playwright/test'",
+        "expect from '@playwright/test'",
+        "request from 'supertest'",
+        "app from '../app'"
+      ]
+    },
+    {
+      "file": "src\\tools\\appDevExtended.ts",
+      "duplicates": [
+        "defineConfig from 'vite'"
+      ]
+    }
+  ],
+  "missing_imports": [],
+  "stats": {
+    "total_files": 89,
+    "files_with_unused": 9,
+    "files_with_duplicates": 4,
+    "total_unused_imports": 13,
+    "total_duplicate_imports": 21
+  }
+}

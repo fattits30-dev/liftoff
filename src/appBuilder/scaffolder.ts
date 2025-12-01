@@ -8,7 +8,6 @@ import * as vscode from 'vscode';
 import {
     AppSpec,
     Architecture,
-    PageRoute,
     Entity
 } from './types';
 import { ArchitectureGenerator } from './architectureGenerator';
@@ -49,20 +48,32 @@ export class Scaffolder {
             // 1. Validate paths (but DON'T create target dir - CLI will do that)
             validatePath(targetDir, this.workspaceRoot);
 
-            // Ensure parent directory exists
-            const parentDir = path.dirname(targetDir);
-            if (!fs.existsSync(parentDir)) {
-                fs.mkdirSync(parentDir, { recursive: true });
-            }
-
-            // Check target directory doesn't already exist
+            // Check if target directory is suitable for building
             if (fs.existsSync(targetDir)) {
-                throw new ValidationError(
-                    `Target directory already exists: ${targetDir}`,
-                    'path',
-                    'empty directory',
-                    'existing directory'
-                );
+                // Directory exists (e.g., current workspace) - check if it's empty or only has acceptable files
+                const entries = fs.readdirSync(targetDir);
+                const allowedFiles = [
+                    '.git', '.github', '.gitignore', '.vscode',
+                    'README.md', 'LICENSE', '.liftoff',
+                    'tech_stack_recommendation.json'  // Created during research phase
+                ];
+                const blockingEntries = entries.filter(entry => !allowedFiles.includes(entry));
+
+                if (blockingEntries.length > 0) {
+                    throw new ValidationError(
+                        `Target directory is not empty. Found: ${blockingEntries.slice(0, 5).join(', ')}${blockingEntries.length > 5 ? '...' : ''}`,
+                        'path',
+                        'empty directory or only .git/.vscode files',
+                        'directory with project files'
+                    );
+                }
+                this.log(`Target directory exists but is suitable for scaffolding (only contains: ${entries.join(', ')})`);
+            } else {
+                // Directory doesn't exist - ensure parent exists so we can create it
+                const parentDir = path.dirname(targetDir);
+                if (!fs.existsSync(parentDir)) {
+                    fs.mkdirSync(parentDir, { recursive: true });
+                }
             }
 
             // THREE-TIER HYBRID APPROACH:
@@ -136,18 +147,44 @@ export class Scaffolder {
     private async bootstrapWithCLI(targetDir: string, spec: AppSpec): Promise<void> {
         const { frontend, bundler, styling, components } = spec.stack;
 
-        // Choose CLI based on stack
-        if (frontend === 'react' && bundler === 'vite') {
-            this.log('Bootstrapping with Vite + React + TypeScript...', 1);
+        // If target directory exists (building in current workspace), use "." instead of project name
+        const dirExists = fs.existsSync(targetDir);
+        const projectArg = dirExists ? '.' : spec.name;
+        const workingDir = dirExists ? targetDir : path.dirname(targetDir);
+
+        // CRITICAL: CLI tools refuse to scaffold into non-empty directories
+        // Temporarily move existing files aside so CLI sees "empty" directory
+        const tempBackupDir = path.join(path.dirname(targetDir), '.liftoff-temp-backup');
+        const movedFiles: string[] = [];
+
+        if (dirExists) {
+            const entries = fs.readdirSync(targetDir);
+            if (entries.length > 0) {
+                this.log(`Temporarily moving ${entries.length} files to allow CLI to run...`, 1);
+                fs.mkdirSync(tempBackupDir, { recursive: true });
+
+                for (const entry of entries) {
+                    const srcPath = path.join(targetDir, entry);
+                    const destPath = path.join(tempBackupDir, entry);
+                    fs.renameSync(srcPath, destPath);
+                    movedFiles.push(entry);
+                }
+            }
+        }
+
+        try {
+            // Choose CLI based on stack
+            if (frontend === 'react' && bundler === 'vite') {
+            this.log(`Bootstrapping with Vite + React + TypeScript in ${dirExists ? 'current directory' : 'new directory'}...`, 1);
             await this.runCommand(
-                `npm create vite@latest ${spec.name} -- --template react-ts`,
-                path.dirname(targetDir)
+                `npm create vite@latest ${projectArg} -- --template react-ts`,
+                workingDir
             );
         } else if (frontend === 'react' && bundler === 'turbopack') {
             this.log('Bootstrapping with Next.js + Turbopack...', 1);
             await this.runCommand(
-                `npx create-next-app@latest ${spec.name} --typescript --tailwind --app --yes`,
-                path.dirname(targetDir)
+                `npx create-next-app@latest ${projectArg} --typescript --tailwind --app --yes`,
+                workingDir
             );
             // Next.js auto-installs, skip npm install step
             this.log('✓ CLI Bootstrap complete', 1);
@@ -155,21 +192,21 @@ export class Scaffolder {
         } else if (frontend === 'vue') {
             this.log('Bootstrapping with Vue + TypeScript...', 1);
             await this.runCommand(
-                `npm create vue@latest ${spec.name} -- --typescript --router --yes`,
-                path.dirname(targetDir)
+                `npm create vue@latest ${projectArg} -- --typescript --router --yes`,
+                workingDir
             );
         } else if (frontend === 'svelte') {
             this.log('Bootstrapping with SvelteKit...', 1);
             await this.runCommand(
-                `npm create svelte@latest ${spec.name} -- --template skeleton --types ts`,
-                path.dirname(targetDir)
+                `npm create svelte@latest ${projectArg} -- --template skeleton --types ts`,
+                workingDir
             );
         } else {
             // Default fallback to Vite React
             this.log('Defaulting to Vite + React + TypeScript...', 1);
             await this.runCommand(
-                `npm create vite@latest ${spec.name} -- --template react-ts`,
-                path.dirname(targetDir)
+                `npm create vite@latest ${projectArg} -- --template react-ts`,
+                workingDir
             );
         }
 
@@ -203,7 +240,22 @@ export class Scaffolder {
             }
         }
 
-        this.log('✓ CLI Bootstrap complete', 1);
+            this.log('✓ CLI Bootstrap complete', 1);
+        } finally {
+            // Restore moved files back to target directory
+            if (movedFiles.length > 0 && fs.existsSync(tempBackupDir)) {
+                this.log(`Restoring ${movedFiles.length} files back to project directory...`, 1);
+                for (const file of movedFiles) {
+                    const srcPath = path.join(tempBackupDir, file);
+                    const destPath = path.join(targetDir, file);
+                    if (fs.existsSync(srcPath)) {
+                        fs.renameSync(srcPath, destPath);
+                    }
+                }
+                // Clean up temp directory
+                fs.rmdirSync(tempBackupDir, { recursive: true });
+            }
+        }
     }
 
     /**
@@ -234,7 +286,7 @@ export const supabase = createClient(supabaseUrl, supabaseAnonKey);
         validatePath(supabasePath, this.workspaceRoot);
         try {
             fs.writeFileSync(supabasePath, supabaseTemplate);
-        } catch (error) {
+        } catch (_error) {
             throw new Tier2OverlayError(
                 'Failed to write Supabase client template',
                 supabasePath,

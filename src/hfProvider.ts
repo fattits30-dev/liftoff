@@ -18,11 +18,37 @@ export const DEFAULT_MODEL = DEFAULT_CLOUD_MODEL_NAME;
 
 export type ModelKey = keyof typeof CODING_MODELS;
 
+/**
+ * HuggingFace LLM provider using the OpenAI-compatible Router API
+ *
+ * @remarks
+ * Uses the HuggingFace Router endpoint (https://router.huggingface.co/v1) which
+ * provides OpenAI-compatible chat completions with support for streaming.
+ *
+ * Supported models include DeepSeek, Qwen, Llama, and other coding-optimized models.
+ *
+ * @example
+ * ```typescript
+ * const provider = new HuggingFaceProvider('hf_...');
+ * for await (const chunk of provider.streamChat(
+ *   'deepseek-ai/DeepSeek-V3-0324',
+ *   [{ role: 'user', content: 'Hello!' }]
+ * )) {
+ *   console.log(chunk);
+ * }
+ * ```
+ */
 export class HuggingFaceProvider {
     private apiKey: string;
     // New router endpoint (OpenAI-compatible)
     private baseUrl = API_ENDPOINTS.huggingface;
-    
+
+    /**
+     * Create a new HuggingFace provider instance
+     *
+     * @param apiKey - HuggingFace API key (must start with 'hf_')
+     * @throws {Error} If API key is missing or invalid format
+     */
     constructor(apiKey: string) {
         // API KEY VALIDATION: Prevent crashes from empty/invalid keys
         if (!apiKey || typeof apiKey !== 'string') {
@@ -38,6 +64,31 @@ export class HuggingFaceProvider {
         this.apiKey = trimmedKey;
     }
 
+    /**
+     * Stream chat completions from HuggingFace Router API
+     *
+     * @param model - Model identifier (e.g., 'deepseek-ai/DeepSeek-V3-0324')
+     * @param messages - Array of chat messages with role and content
+     * @param options - Optional parameters for max tokens and temperature
+     * @returns AsyncGenerator yielding response chunks as they arrive
+     *
+     * @throws {Error} If the API request fails or returns an error status
+     *
+     * @remarks
+     * Uses Server-Sent Events (SSE) for streaming. The response is parsed
+     * in OpenAI-compatible format: `data: {"choices": [{"delta": {"content": "..."}}]}`
+     *
+     * @example
+     * ```typescript
+     * for await (const chunk of provider.streamChat(
+     *   'deepseek-ai/DeepSeek-V3-0324',
+     *   [{ role: 'user', content: 'Write a hello world function' }],
+     *   { maxTokens: 1000, temperature: 0.7 }
+     * )) {
+     *   process.stdout.write(chunk);
+     * }
+     * ```
+     */
     async *streamChat(
         model: string,
         messages: HFMessage[],
@@ -106,6 +157,18 @@ export class HuggingFaceProvider {
         }
     }
 
+    /**
+     * Non-streaming chat completion (waits for full response)
+     *
+     * @param model - Model identifier
+     * @param messages - Array of chat messages
+     * @param options - Optional parameters for max tokens and temperature
+     * @returns Complete response text
+     *
+     * @remarks
+     * This internally uses `streamChat()` and collects all chunks into a single string.
+     * For better UX in interactive applications, prefer `streamChat()`.
+     */
     async chat(
         model: string,
         messages: HFMessage[],
@@ -118,7 +181,16 @@ export class HuggingFaceProvider {
         return result;
     }
 
-    // Test the connection
+    /**
+     * Test the connection to HuggingFace Router API
+     *
+     * @param model - Model identifier to test
+     * @returns True if connection succeeds, false otherwise
+     *
+     * @remarks
+     * Sends a minimal chat completion request with maxTokens=5 to verify
+     * that the API key is valid and the model is accessible.
+     */
     async testConnection(model: string): Promise<boolean> {
         try {
             const response = await fetch(`${this.baseUrl}/chat/completions`, {

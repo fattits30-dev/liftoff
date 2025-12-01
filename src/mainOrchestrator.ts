@@ -182,41 +182,41 @@ After each agent completes or fails, you MUST provide a status update:
 ⚠️ Blockers: None
 
 ## CRITICAL: CHECK FOR .liftoff PLAN FILE FIRST
-BEFORE doing ANYTHING, check if a .liftoff file exists in the working directory:
+BEFORE doing ANYTHING, check if a .liftoff/plan.json file exists in the working directory:
 
 \`\`\`tool
-{"name": "read_file", "params": {"path": ".liftoff"}}
+{"name": "read_file", "params": {"path": ".liftoff/plan.json"}}
 \`\`\`
 
-**If .liftoff EXISTS:**
+**If .liftoff/plan.json EXISTS:**
 - You are in APP BUILDER mode
 - Follow the phase instructions in the file EXACTLY
 - Use AppBuilderOrchestrator methods - DO NOT manually create files
-- Update the .liftoff file as you progress through phases
+- Update the .liftoff/plan.json file as you progress through phases
 - The file tells you EXACTLY what to do next
 
-**If .liftoff DOES NOT exist:**
+**If .liftoff/plan.json DOES NOT exist:**
 - Check if user wants to BUILD AN APP or EDIT CODE
-- If building app: Create .liftoff file and enter APP BUILDER mode
+- If building app: Create .liftoff directory structure and enter APP BUILDER mode
 - If editing code: Continue with normal delegation workflow
 
 **APP BUILDER Mode vs CODE EDITING Mode:**
-- **APP BUILDER**: "Build me a recipe app" → Use .liftoff phases
+- **APP BUILDER**: "Build me a recipe app" → Use .liftoff/plan.json phases
 - **CODE EDITING**: "Fix the login bug" → Direct agent delegation
 
-When in APP BUILDER mode, the .liftoff file contains:
+When in APP BUILDER mode, the .liftoff/plan.json file contains:
 - Current phase (spec, architecture, scaffold, implement, test, deploy)
 - What to do in this phase
 - What NOT to do (like manually creating files)
 - When to move to next phase
 
-**ALWAYS update .liftoff file after completing each phase:**
+**ALWAYS update .liftoff/plan.json after completing each phase:**
 \`\`\`tool
-{"name": "write_file", "params": {"path": ".liftoff", "content": "updated JSON"}}
+{"name": "write_file", "params": {"path": ".liftoff/plan.json", "content": "updated JSON"}}
 \`\`\`
 
 ## RULES
-- **ALWAYS check for .liftoff file first** - It keeps you on track
+- **ALWAYS check for .liftoff/plan.json first** - It keeps you on track
 - **ALWAYS research BEFORE first delegation** - Use research tools to look up best stack
 - ONE delegation at a time - wait for result before next
 - **ALWAYS provide status update after each agent result**
@@ -233,15 +233,15 @@ When in APP BUILDER mode, the .liftoff file contains:
 **You (PM):** Understood! First let me check if there's a .liftoff plan file.
 
 \`\`\`tool
-{"name": "read_file", "params": {"path": ".liftoff"}}
+{"name": "read_file", "params": {"path": ".liftoff/plan.json"}}
 \`\`\`
 
 [File not found - this is a new app build request]
 
-**You (PM):** No .liftoff file found. This is a new app build request. I'll enter APP BUILDER mode and create the plan.
+**You (PM):** No .liftoff/plan.json found. This is a new app build request. I'll enter APP BUILDER mode and create the plan.
 
 \`\`\`tool
-{"name": "write_file", "params": {"path": ".liftoff", "content": "{...initial plan...}"}}
+{"name": "write_file", "params": {"path": ".liftoff/plan.json", "content": "{...initial plan...}"}}
 \`\`\`
 
 📊 **ENTERING APP BUILDER MODE**
@@ -263,10 +263,10 @@ I will use the AppBuilderOrchestrator.runSpecPhase() to:
 - Entities: Recipe, MealPlan, Ingredient, User
 - Pages: /, /recipes, /meal-plan, /login, /signup
 
-Updating .liftoff file to move to ARCHITECTURE phase...
+Updating .liftoff/plan.json to move to ARCHITECTURE phase...
 
 \`\`\`tool
-{"name": "write_file", "params": {"path": ".liftoff", "content": "{...updated with phase=architecture...}"}}
+{"name": "write_file", "params": {"path": ".liftoff/plan.json", "content": "{...updated with phase=architecture...}"}}
 \`\`\`
 
 📊 **PHASE: ARCHITECTURE**
@@ -280,7 +280,7 @@ Now generating system architecture from spec...
 **You (PM):** Let me check for .liftoff file first.
 
 \`\`\`tool
-{"name": "read_file", "params": {"path": ".liftoff"}}
+{"name": "read_file", "params": {"path": ".liftoff/plan.json"}}
 \`\`\`
 
 [File not found - this is code editing]
@@ -377,7 +377,20 @@ export class MainOrchestrator {
     }
 
     /**
-     * Connect to the agent manager (call this after construction)
+     * Connect the orchestrator to the agent manager
+     *
+     * @param manager - The agent manager instance that will handle agent spawning and execution
+     *
+     * @remarks
+     * This must be called after construction to enable agent delegation.
+     * The orchestrator will subscribe to agent events for monitoring and supervision.
+     *
+     * @example
+     * ```typescript
+     * const orchestrator = new MainOrchestrator(workspaceRoot);
+     * const agentManager = new AutonomousAgentManager(context);
+     * orchestrator.setAgentManager(agentManager);
+     * ```
      */
     setAgentManager(manager: AutonomousAgentManager): void {
         this.agentManager = manager;
@@ -407,6 +420,29 @@ export class MainOrchestrator {
         this.log('Agent manager connected with monitoring');
     }
 
+    /**
+     * Configure the LLM provider with an API key
+     *
+     * @param apiKey - The API key for the configured LLM provider (HuggingFace or empty string for Ollama)
+     *
+     * @throws {Error} If Ollama is selected but not running/accessible
+     *
+     * @remarks
+     * The provider type is determined by the `liftoff.llmProvider` VS Code setting.
+     * - If `ollama`: Connects to local Ollama instance (no API key needed)
+     * - If `huggingface`: Uses HuggingFace Router API with provided key
+     *
+     * Also initializes MCP tools after provider is configured.
+     *
+     * @example
+     * ```typescript
+     * // HuggingFace
+     * await orchestrator.setApiKey('hf_...');
+     *
+     * // Ollama (empty string is fine)
+     * await orchestrator.setApiKey('');
+     * ```
+     */
     async setApiKey(apiKey: string): Promise<void> {
         // Get provider preference from settings
         const config = vscode.workspace.getConfiguration('liftoff');
@@ -529,7 +565,27 @@ export class MainOrchestrator {
 
 
     /**
-     * Main entry point - process user task
+     * Main entry point for processing user tasks
+     *
+     * @param userMessage - The user's task description or request
+     * @returns A summary of the task completion or error message
+     *
+     * @remarks
+     * This method automatically detects whether the user wants to:
+     * - **Build a new app**: Phrases like "build me a...", "create an app..."
+     * - **Edit existing code**: Phrases like "fix the...", "debug...", "refactor..."
+     *
+     * For app building, it delegates to `AppBuilderOrchestrator` which follows a structured workflow.
+     * For code editing, it uses the planning loop to delegate tasks to specialized agents.
+     *
+     * @example
+     * ```typescript
+     * // App building
+     * const result = await orchestrator.chat("Build me a recipe app with authentication");
+     *
+     * // Code editing
+     * const result = await orchestrator.chat("Fix the login validation bug");
+     * ```
      */
     async chat(userMessage: string): Promise<string> {
         if (!this.llmProvider) {
@@ -563,8 +619,32 @@ export class MainOrchestrator {
     }
 
     /**
-     * Public API for AppBuilder to delegate tasks directly to agents
-     * Bypasses the chat/planning interface for direct task execution
+     * Public API for direct task delegation to agents (bypasses planning loop)
+     *
+     * @param agent - The type of agent to delegate to ('frontend', 'backend', 'testing', etc.)
+     * @param task - The specific task description for the agent
+     * @returns Object with success status, result message, and optional error
+     *
+     * @remarks
+     * This is the primary method used by `AppBuilderOrchestrator` to execute tasks
+     * without going through the chat/planning interface. It directly spawns an agent
+     * and waits for completion.
+     *
+     * The method handles:
+     * - Agent pool limits (max 6 concurrent agents)
+     * - Automatic retries (up to 3 attempts)
+     * - TODO list creation for failed tasks after max retries
+     *
+     * @example
+     * ```typescript
+     * const result = await orchestrator.delegateTask(
+     *   'frontend',
+     *   'Create a LoginForm component using React hooks'
+     * );
+     * if (result.success) {
+     *   console.log('Task completed:', result.message);
+     * }
+     * ```
      */
     async delegateTask(agent: AgentType, task: string): Promise<{ success: boolean; message: string; error?: string }> {
         if (!this.llmProvider) {
@@ -715,24 +795,10 @@ export class MainOrchestrator {
     private async handleAppBuild(userMessage: string): Promise<string> {
         this.log('📋 Starting AppBuilder workflow...');
 
-        // Ask user where to create the project
-        const defaultDir = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ||
-                          this.workspaceRoot;
+        // Build in the current workspace (VS Code is already open where user wants the app)
+        const targetDir = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || this.workspaceRoot;
 
-        const targetFolder = await vscode.window.showOpenDialog({
-            canSelectFolders: true,
-            canSelectFiles: false,
-            canSelectMany: false,
-            openLabel: 'Select Project Location',
-            defaultUri: vscode.Uri.file(defaultDir)
-        });
-
-        if (!targetFolder || targetFolder.length === 0) {
-            return '❌ App build cancelled - no folder selected';
-        }
-
-        const targetDir = targetFolder[0].fsPath;
-        this.log(`Target directory: ${targetDir}`);
+        this.log(`Building app in current workspace: ${targetDir}`);
 
         // Create AppBuilderOrchestrator and run
         const extensionPath = vscode.extensions.getExtension('jamie.liftoff')?.extensionPath || '';
@@ -1188,7 +1254,18 @@ export class MainOrchestrator {
     }
 
     /**
-     * Get current TODO list
+     * Get the current TODO list of failed tasks
+     *
+     * @returns Array of TODO items representing tasks that failed after max retries
+     *
+     * @remarks
+     * Tasks are added to the TODO list when they fail 3 times consecutively.
+     * Each item contains:
+     * - task: The original task description
+     * - agentType: Which agent was used
+     * - error: The error message from the last attempt
+     * - attempts: Number of times it was tried
+     * - timestamp: When it was added to TODO list
      */
     getTodoList(): TodoItem[] {
         return [...this.todoList];
@@ -1203,7 +1280,11 @@ export class MainOrchestrator {
 
 
     /**
-     * Abort current operation
+     * Abort the current operation and stop all processing
+     *
+     * @remarks
+     * This immediately stops the planning loop and sets the orchestrator status to 'idle'.
+     * Any running agents will continue execution - use `agentManager.stopAllAgents()` to stop them.
      */
     abort(): void {
         this.abortController?.abort();
@@ -1212,7 +1293,17 @@ export class MainOrchestrator {
     }
 
     /**
-     * Reset conversation
+     * Reset conversation history and clear all state
+     *
+     * @remarks
+     * This clears:
+     * - All message history (except system prompt)
+     * - Retry tracker
+     * - TODO list
+     * - Iteration counter
+     *
+     * The orchestrator status is set back to 'idle'.
+     * Use this to start fresh conversations without recreating the orchestrator.
      */
     reset(): void {
         const mcpRouter = getMcpRouter();

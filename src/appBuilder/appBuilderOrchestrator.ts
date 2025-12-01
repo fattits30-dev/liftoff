@@ -3,8 +3,6 @@
  */
 
 import * as vscode from 'vscode';
-import * as path from 'path';
-import * as fs from 'fs/promises';
 import {
     AppSpec,
     Architecture,
@@ -22,11 +20,9 @@ import { MainOrchestrator } from '../mainOrchestrator';
 import {
     LiftoffPlan,
     createInitialPlan,
-    updatePhaseStatus,
-    addFeature,
-    serializePlan,
-    deserializePlan
+    updatePhaseStatus
 } from './liftoffPlan';
+import { LiftoffDirectory } from './liftoffDirectory';
 
 export interface BuildResult {
     success: boolean;
@@ -49,6 +45,7 @@ export class AppBuilderOrchestrator {
     private outputChannel: vscode.OutputChannel;
     private statusBarItem: vscode.StatusBarItem;
     private liftoffPlan?: LiftoffPlan;
+    private liftoffDir?: LiftoffDirectory;
     private webview?: vscode.WebviewPanel;
 
     constructor(
@@ -80,11 +77,13 @@ export class AppBuilderOrchestrator {
         this.outputChannel.show();
         this.statusBarItem.show();
 
-        // Create initial .liftoff plan file
-        this.liftoffPlan = createInitialPlan(description, targetDir);
-        await this.saveLiftoffPlan(targetDir);
+        // Create LiftoffDirectory instance (but don't initialize yet - target dir doesn't exist)
+        this.liftoffDir = new LiftoffDirectory(targetDir);
 
-        this.log('init', '📋 Created .liftoff plan file - entering APP BUILDER mode', 'started');
+        // Create initial plan (stored in memory until after scaffold)
+        this.liftoffPlan = createInitialPlan(description, targetDir);
+
+        this.log('init', '📋 Created build plan - entering APP BUILDER mode', 'started');
 
         this.buildState = {
             phase: 'spec',
@@ -97,43 +96,54 @@ export class AppBuilderOrchestrator {
         try {
             // PHASE 1: Specification
             this.liftoffPlan = updatePhaseStatus(this.liftoffPlan, 'spec', 'in-progress');
-            await this.saveLiftoffPlan(targetDir);
             this.setPhase('spec', 'Analyzing requirements...');
             const spec = await this.runSpecPhase(description);
             if (!spec) {
                 return this.buildError('Spec generation cancelled');
             }
             this.buildState.spec = spec;
+
             this.liftoffPlan = updatePhaseStatus(this.liftoffPlan, 'spec', 'complete');
-            this.liftoffPlan.artifacts.specFile = path.join(targetDir, 'liftoff.spec.json');
-            await this.saveLiftoffPlan(targetDir);
+            this.liftoffPlan.artifacts.specFile = this.liftoffDir!.getFilePaths().spec;
 
             // PHASE 2: Architecture
             this.liftoffPlan = updatePhaseStatus(this.liftoffPlan, 'architecture', 'in-progress');
-            await this.saveLiftoffPlan(targetDir);
             this.setPhase('architecture', 'Designing system...');
             const architecture = await this.runArchitecturePhase(spec);
             this.buildState.architecture = architecture;
+
             this.liftoffPlan = updatePhaseStatus(this.liftoffPlan, 'architecture', 'complete');
-            this.liftoffPlan.artifacts.archFile = path.join(targetDir, 'liftoff.architecture.json');
-            await this.saveLiftoffPlan(targetDir);
+            this.liftoffPlan.artifacts.archFile = this.liftoffDir!.getFilePaths().architecture;
 
             // PHASE 3: Scaffold
             this.liftoffPlan = updatePhaseStatus(this.liftoffPlan, 'scaffold', 'in-progress');
-            await this.saveLiftoffPlan(targetDir);
             this.setPhase('scaffold', 'Setting up project...');
             await this.runScaffoldPhase(targetDir, spec, architecture);
             this.buildState.projectPath = targetDir;
-            this.liftoffPlan = updatePhaseStatus(this.liftoffPlan, 'scaffold', 'complete');
-            await this.saveLiftoffPlan(targetDir);
 
-            // PHASE 4: Implementation
-            this.liftoffPlan = updatePhaseStatus(this.liftoffPlan, 'implement', 'in-progress');
-            await this.saveLiftoffPlan(targetDir);
-            this.setPhase('implement', 'Writing code...');
-            await this.runImplementationPhase(targetDir, spec, architecture);
+            // NOW the project directory exists - initialize .liftoff and save everything
+            await this.liftoffDir!.initialize();
+            this.log('init', '📁 Initialized .liftoff directory', 'started');
+
+            // Save all collected data to .liftoff directory
+            await this.liftoffDir!.saveSpec(spec);
+            await this.liftoffDir!.saveArchitecture(architecture);
+            await this.liftoffDir!.initializeContext(description, spec);
+            await this.liftoffDir!.appendContext('Scaffold Completed',
+                `Project structure created with ${spec.stack.frontend} + ${spec.stack.backend}.`);
+
+            this.liftoffPlan = updatePhaseStatus(this.liftoffPlan, 'scaffold', 'complete');
+            await this.liftoffDir!.savePlan(this.liftoffPlan);
+
+            // PHASE 4: Implementation (SKIPPED - scaffolder handles everything)
+            // TODO: Implement incremental feature additions via agents
+            // For now, scaffolder creates a complete working app with TIER 1+2+3
+            this.log('implement', 'Scaffolder created complete app structure', 'completed');
             this.liftoffPlan = updatePhaseStatus(this.liftoffPlan, 'implement', 'complete');
-            await this.saveLiftoffPlan(targetDir);
+            await this.liftoffDir!.savePlan(this.liftoffPlan);
+
+            await this.liftoffDir!.appendContext('Implementation Completed',
+                'Scaffolder created complete app structure with all templates and base code.');
 
             // Complete! Skip tests and deployment for now
             this.log('complete', '✅ Build complete!', 'completed');
@@ -643,26 +653,27 @@ Please implement this task following the project patterns and type definitions a
     }
 
     /**
-     * Save .liftoff plan file
+     * Save .liftoff plan file (deprecated - uses LiftoffDirectory now)
+     * Kept for backward compatibility
      */
-    private async saveLiftoffPlan(projectPath: string): Promise<void> {
-        if (!this.liftoffPlan) return;
+    private async saveLiftoffPlan(_projectPath: string): Promise<void> {
+        if (!this.liftoffPlan || !this.liftoffDir) return;
 
-        const liftoffPath = path.join(projectPath, '.liftoff');
-        const content = serializePlan(this.liftoffPlan);
-        await fs.writeFile(liftoffPath, content, 'utf-8');
-        this.log('plan', 'Updated .liftoff file', 'started');
+        await this.liftoffDir.savePlan(this.liftoffPlan);
+        this.log('plan', 'Updated .liftoff directory', 'started');
     }
 
     /**
-     * Load existing .liftoff plan file
+     * Load existing .liftoff plan file (deprecated - uses LiftoffDirectory now)
+     * Kept for backward compatibility
      */
     private async loadLiftoffPlan(projectPath: string): Promise<LiftoffPlan | null> {
         try {
-            const liftoffPath = path.join(projectPath, '.liftoff');
-            const content = await fs.readFile(liftoffPath, 'utf-8');
-            return deserializePlan(content);
-        } catch (error) {
+            if (!this.liftoffDir) {
+                this.liftoffDir = new LiftoffDirectory(projectPath);
+            }
+            return await this.liftoffDir.loadPlan();
+        } catch (_error) {
             return null;
         }
     }

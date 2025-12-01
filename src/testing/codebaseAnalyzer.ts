@@ -97,7 +97,7 @@ export class CodebaseAnalyzer {
         try {
             const content = fs.readFileSync(pkgPath, 'utf-8');
             return JSON.parse(content);
-        } catch (error) {
+        } catch (_error) {
             return { dependencies: {}, devDependencies: {} };
         }
     }
@@ -273,7 +273,7 @@ export class CodebaseAnalyzer {
 
         // This is a simplified version - would need more sophisticated parsing
         for (const file of modelFiles) {
-            const content = fs.readFileSync(file, 'utf-8');
+            const _content = fs.readFileSync(file, 'utf-8');
             const name = path.basename(file, path.extname(file));
 
             models.push({
@@ -311,7 +311,7 @@ export class CodebaseAnalyzer {
         const propsMatch = content.match(/(?:interface|type)\s+\w+Props\s*=?\s*{([^}]+)}/);
         if (propsMatch) {
             const propsBody = propsMatch[1];
-            const propMatches = propsBody.matchAll(/(\w+)[\?:]?\s*:/g);
+            const propMatches = propsBody.matchAll(/(\w+)[?:]?\s*:/g);
             for (const match of propMatches) {
                 props.push(match[1]);
             }

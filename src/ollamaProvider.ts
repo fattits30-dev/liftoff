@@ -1,6 +1,23 @@
 /**
  * Ollama Provider - Local LLM inference via Ollama
- * Compatible interface with HuggingFaceProvider for drop-in replacement
+ *
+ * @remarks
+ * Provides a compatible interface with HuggingFaceProvider for drop-in replacement.
+ * Connects to a local or remote Ollama instance for running open-source LLMs.
+ *
+ * Supports both local models (fast, private) and cloud models (more capable).
+ *
+ * @example
+ * ```typescript
+ * const provider = new OllamaProvider('http://localhost:11434', 'deepseek-coder:6.7b');
+ * const isRunning = await provider.healthCheck();
+ * if (isRunning) {
+ *   const response = await provider.chat(
+ *     'deepseek-coder:6.7b',
+ *     [{ role: 'user', content: 'Hello!' }]
+ *   );
+ * }
+ * ```
  */
 
 export interface OllamaMessage {
@@ -19,6 +36,16 @@ export class OllamaProvider {
     private baseUrl: string;
     private defaultModel: string;
 
+    /**
+     * Create a new Ollama provider instance
+     *
+     * @param baseUrl - Ollama server URL (default: 'http://localhost:11434')
+     * @param defaultModel - Default model to use (default: 'deepseek-v3.1:671b-cloud')
+     *
+     * @remarks
+     * The baseUrl should point to a running Ollama instance. Use `healthCheck()`
+     * to verify connectivity before making requests.
+     */
     constructor(baseUrl: string = 'http://localhost:11434', defaultModel: string = 'deepseek-v3.1:671b-cloud') {
         this.baseUrl = baseUrl.replace(/\/$/, ''); // Remove trailing slash
         this.defaultModel = defaultModel;
@@ -27,7 +54,29 @@ export class OllamaProvider {
 
     /**
      * Stream chat completions from Ollama
-     * Compatible with HuggingFaceProvider interface
+     *
+     * @param model - Model name (e.g., 'deepseek-coder:6.7b', 'deepseek-v3.1:671b-cloud')
+     * @param messages - Array of chat messages with role and content
+     * @param options - Optional parameters for max tokens, temperature, and thinking mode
+     * @returns AsyncGenerator yielding response chunks as they arrive
+     *
+     * @throws {Error} If Ollama API returns an error or is unreachable
+     *
+     * @remarks
+     * Compatible interface with HuggingFaceProvider for drop-in replacement.
+     * Uses Ollama's native streaming format where each line is a JSON object
+     * with `message.content` and `done` fields.
+     *
+     * @example
+     * ```typescript
+     * for await (const chunk of provider.streamChat(
+     *   'deepseek-coder:6.7b',
+     *   [{ role: 'user', content: 'Write a function' }],
+     *   { temperature: 0.7 }
+     * )) {
+     *   process.stdout.write(chunk);
+     * }
+     * ```
      */
     async *streamChat(
         model: string,
@@ -93,7 +142,7 @@ export class OllamaProvider {
                             console.log(`[OllamaProvider] Stream completed`);
                             return;
                         }
-                    } catch (e) {
+                    } catch (_e) {
                         console.warn('[OllamaProvider] Failed to parse line:', line);
                     }
                 }
@@ -144,7 +193,19 @@ export class OllamaProvider {
     }
 
     /**
-     * List available models in Ollama
+     * List available models in the local Ollama instance
+     *
+     * @returns Array of model names (e.g., ['deepseek-coder:6.7b', 'qwen2.5-coder'])
+     *
+     * @remarks
+     * Returns an empty array if the request fails or no models are installed.
+     * Use `pullModel()` to download new models from the Ollama registry.
+     *
+     * @example
+     * ```typescript
+     * const models = await provider.listModels();
+     * console.log('Available models:', models.join(', '));
+     * ```
      */
     async listModels(): Promise<string[]> {
         try {
@@ -162,6 +223,19 @@ export class OllamaProvider {
 
     /**
      * Check if Ollama is running and accessible
+     *
+     * @returns True if Ollama server responds to /api/tags endpoint, false otherwise
+     *
+     * @remarks
+     * Use this before making other API calls to verify the server is reachable.
+     * Returns false if the server is down, unreachable, or returns an error status.
+     *
+     * @example
+     * ```typescript
+     * if (!(await provider.healthCheck())) {
+     *   console.error('Ollama is not running. Start it with: ollama serve');
+     * }
+     * ```
      */
     async healthCheck(): Promise<boolean> {
         try {

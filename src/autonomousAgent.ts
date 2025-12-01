@@ -1,9 +1,7 @@
 import * as vscode from 'vscode';
 import { HuggingFaceProvider, HFMessage } from './hfProvider';
-import { OllamaProvider, OllamaMessage } from './ollamaProvider';
-import { TOOLS, ToolResult, VSCODE_TOOLS, Tool } from './tools';
-import { BROWSER_TOOLS } from './tools/browser';
-import { GIT_TOOLS } from './tools/git';
+import { OllamaProvider } from './ollamaProvider';
+import { ToolResult } from './tools';
 import { LessonsManager } from './tools/lessons';
 import { Artifact } from './agentCommunication';
 import { getMcpRouter, McpRouter, disposeMcpRouter, disposeMcpOutputChannel } from './mcp';
@@ -11,7 +9,6 @@ import { AgentMemory, SemanticMemoryStore } from './memory/agentMemory';
 import {
     DEFAULT_CLOUD_MODEL_NAME,
     DEFAULT_OLLAMA_MODEL_NAME,
-    DEFAULT_OLLAMA_AGENT_MODEL_NAME,
     DEFAULT_PROVIDER,
     API_ENDPOINTS,
     LIMITS,
@@ -50,6 +47,35 @@ const AGENT_EMOJIS: Record<AgentType, string> = {
     cleaner: '🧹'
 };
 
+/**
+ * Manages autonomous agent lifecycle, execution, and monitoring
+ *
+ * @remarks
+ * This class handles:
+ * - Agent spawning and lifecycle management
+ * - LLM provider configuration (Ollama/HuggingFace)
+ * - Tool execution via MCP router
+ * - Agent supervision and loop detection
+ * - Memory system integration
+ * - Event-driven UI updates via unified agent view
+ *
+ * Agents run autonomously in a loop:
+ * 1. LLM generates response (streamed)
+ * 2. Parse tool calls from response
+ * 3. Execute tools via MCP
+ * 4. Feed results back to LLM
+ * 5. Repeat until task complete, error, or max iterations
+ *
+ * @example
+ * ```typescript
+ * const manager = new AutonomousAgentManager(context);
+ * await manager.setApiKey('hf_...');
+ * const agent = await manager.spawnAgent({
+ *   type: 'frontend',
+ *   task: 'Create LoginForm component'
+ * });
+ * ```
+ */
 export class AutonomousAgentManager {
     private llmProvider: HuggingFaceProvider | OllamaProvider | null = null;
     private providerType: LLMProvider = DEFAULT_PROVIDER;
@@ -105,6 +131,21 @@ export class AutonomousAgentManager {
 
     private workspaceRoot: string;
 
+    /**
+     * Create a new agent manager instance
+     *
+     * @param context - VS Code extension context
+     * @param semanticMemory - Optional semantic memory store for agent memory system
+     *
+     * @remarks
+     * Initializes:
+     * - Unified agent view (webview panel)
+     * - MCP router with local tools (file operations, etc.)
+     * - Lessons manager for error recovery
+     * - Event subscriptions for UI updates
+     *
+     * External MCP servers are loaded asynchronously after construction.
+     */
     constructor(context: vscode.ExtensionContext, semanticMemory?: SemanticMemoryStore) {
         this.extensionUri = context.extensionUri;
         const workspaceFolders = vscode.workspace.workspaceFolders;
@@ -195,6 +236,30 @@ export class AutonomousAgentManager {
         }
     }
 
+    /**
+     * Configure the LLM provider with an API key
+     *
+     * @param apiKey - API key for the configured provider (HuggingFace or empty for Ollama)
+     *
+     * @remarks
+     * Provider type is determined by `liftoff.llmProvider` setting:
+     * - `ollama`: Uses local/cloud Ollama instance (no API key needed)
+     * - `huggingface`: Uses HuggingFace Router API
+     *
+     * For Ollama, agents can use a different model than the orchestrator
+     * via the `liftoff.ollamaAgentModel` setting (e.g., fast local model for agents).
+     *
+     * Also initializes MCP router with external servers after provider is set.
+     *
+     * @example
+     * ```typescript
+     * // HuggingFace
+     * await manager.setApiKey('hf_...');
+     *
+     * // Ollama
+     * await manager.setApiKey('');
+     * ```
+     */
     async setApiKey(apiKey: string): Promise<void> {
         // Get provider preference from settings
         const config = vscode.workspace.getConfiguration('liftoff');
@@ -241,6 +306,50 @@ export class AutonomousAgentManager {
         this.outputChannel.appendLine(`[AgentManager] Default model set to: ${model}`);
     }
 
+    /**
+     * Spawn a new autonomous agent to work on a task
+     *
+     * @param options - Agent configuration
+     * @param options.type - Agent type ('frontend', 'backend', 'testing', 'browser', 'cleaner', 'general')
+     * @param options.task - Task description for the agent
+     * @param options.model - Optional model override (uses default if not specified)
+     * @param options.maxIterations - Optional max iterations (default: 50)
+     * @returns The spawned agent instance
+     *
+     * @remarks
+     * The agent runs autonomously in a loop:
+     * 1. Streams LLM response
+     * 2. Parses tool calls from response
+     * 3. Executes tools via MCP
+     * 4. Feeds results back to LLM
+     * 5. Detects completion, errors, or infinite loops
+     *
+     * Agent types have specialized system prompts:
+     * - **frontend**: React, CSS, UI components, styling
+     * - **backend**: APIs, databases, business logic, servers
+     * - **testing**: Running tests, fixing test failures
+     * - **browser**: Playwright automation, UI testing
+     * - **cleaner**: Dead code removal, linting, formatting
+     * - **general**: File operations, git, miscellaneous tasks
+     *
+     * The agent runs in the background. Use events to monitor progress:
+     * - `onAgentUpdate`: Status changes
+     * - `onAgentOutput`: Streaming thoughts/tool calls
+     * - `onAgentComplete`: Final completion/error
+     *
+     * @example
+     * ```typescript
+     * const agent = await manager.spawnAgent({
+     *   type: 'frontend',
+     *   task: 'Create a LoginForm component with email and password fields',
+     *   maxIterations: 30
+     * });
+     *
+     * manager.onAgentComplete(({ agentId, status, agent }) => {
+     *   console.log(`Agent ${agentId} finished with status: ${status}`);
+     * });
+     * ```
+     */
     async spawnAgent(options: {
         type: AgentType;
         task: string;
@@ -647,6 +756,28 @@ export class AutonomousAgentManager {
     }
 
 
+    /**
+     * Continue a paused agent with user input
+     *
+     * @param agentId - The agent's unique ID
+     * @param userResponse - The user's response to the agent's question
+     *
+     * @remarks
+     * Agents can pause execution using the `ask_user` tool when they need input.
+     * This method resumes the agent's loop with the provided response.
+     *
+     * Only works for agents in `waiting_user` status.
+     *
+     * @example
+     * ```typescript
+     * manager.onAgentOutput(({ agentId, content, type }) => {
+     *   if (content.includes('⏸️ Waiting for your response')) {
+     *     // Agent is waiting for input
+     *     manager.continueAgent(agentId, 'Yes, proceed with the changes');
+     *   }
+     * });
+     * ```
+     */
     async continueAgent(agentId: string, userResponse: string): Promise<void> {
         const agent = this.agents.get(agentId);
         if (!agent || agent.status !== 'waiting_user') return;
@@ -667,6 +798,15 @@ export class AutonomousAgentManager {
         });
     }
 
+    /**
+     * Stop a running agent gracefully
+     *
+     * @param agentId - The agent's unique ID
+     *
+     * @remarks
+     * Sets the agent's status to 'stopped' and aborts its execution loop.
+     * The agent will finish its current iteration before stopping.
+     */
     stopAgent(agentId: string): void {
         const agent = this.agents.get(agentId);
         if (agent) {
@@ -676,6 +816,11 @@ export class AutonomousAgentManager {
         }
     }
 
+    /**
+     * Kill an agent immediately (alias for stopAgent)
+     *
+     * @param agentId - The agent's unique ID
+     */
     killAgent(agentId: string): void {
         this.stopAgent(agentId);
     }
@@ -697,8 +842,26 @@ export class AutonomousAgentManager {
         this.outputChannel.appendLine(`[${agent.name}] ${msg}`);
     }
 
+    /**
+     * Get an agent by ID
+     *
+     * @param id - The agent's unique ID
+     * @returns The agent instance, or undefined if not found
+     */
     public getAgent(id: string): Agent | undefined { return this.agents.get(id); }
+
+    /**
+     * Get all agents (running, completed, stopped, etc.)
+     *
+     * @returns Array of all agent instances
+     */
     public getAllAgents(): Agent[] { return Array.from(this.agents.values()); }
+
+    /**
+     * Get only agents currently running
+     *
+     * @returns Array of agents with status 'running'
+     */
     public getRunningAgents(): Agent[] { return this.getAllAgents().filter(a => a.status === 'running'); }
     public removeAgent(id: string): void {
         // Remove agent from unified view
@@ -719,6 +882,15 @@ export class AutonomousAgentManager {
         this.outputChannel.show(true);
     }
 
+    /**
+     * Test the LLM provider connection
+     *
+     * @returns True if provider is accessible and responding, false otherwise
+     *
+     * @remarks
+     * For Ollama: Checks /api/tags endpoint
+     * For HuggingFace: Sends minimal test request with the default model
+     */
     public async testConnection(): Promise<boolean> {
         if (!this.llmProvider) return false;
 
@@ -754,6 +926,13 @@ export class AutonomousAgentManager {
         return { dispose: () => {} };
     }
 
+    /**
+     * Clean up resources and stop all agents
+     *
+     * @remarks
+     * Called when the extension is deactivated. Stops all running agents,
+     * disposes event emitters, and disconnects from MCP servers.
+     */
     public dispose(): void {
         this.stopAllAgents();
         this.activeLoops.clear();  // Clear race condition tracker

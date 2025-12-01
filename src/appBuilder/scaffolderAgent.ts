@@ -45,7 +45,7 @@ export class ScaffolderAgent {
     /**
      * Create directory structure (ensure pages dir exists)
      */
-    private async createDirectoryStructure(spec: AppSpec): Promise<void> {
+    private async createDirectoryStructure(_spec: AppSpec): Promise<void> {
         const dirs = [
             'src/pages',
             'src/layouts'

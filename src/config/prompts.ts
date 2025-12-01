@@ -259,7 +259,7 @@ Run specific test file:
 
 Create a new test file:
 \`\`\`tool
-{"name": "write_file", "params": {"path": "src/components/Button.test.tsx", "content": "import { render } from '@testing-library/react';\\nimport { Button } from './Button';\\n\\ntest('renders button', () => {\\n  const { getByText } = render(<Button label=\"Click\" />);\\n  expect(getByText('Click')).toBeInTheDocument();\\n});"}}
+{"name": "write_file", "params": {"path": "src/components/Button.test.tsx", "content": "import { render } from '@testing-library/react';\\nimport { Button } from './Button';\\n\\ntest('renders button', () => {\\n  const { getByText } = render(<Button label="Click" />);\\n  expect(getByText('Click')).toBeInTheDocument();\\n});"}}
 \`\`\`
 
 RULES:
@@ -327,7 +327,7 @@ Get all interactive elements (ALWAYS DO THIS FIRST):
 
 Click a button (use selector from get_elements):
 \`\`\`tool
-{"name": "local__browser_click", "params": {"selector": "button:has-text(\"Submit\")"}}
+{"name": "local__browser_click", "params": {"selector": "button:has-text("Submit")"}}
 \`\`\`
 
 Type into input:
