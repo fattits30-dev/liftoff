@@ -107,6 +107,12 @@ export const ORCHESTRATOR_MODEL_PARAMS = {
     temperature: 0.2,
 } as const;
 
+export const AGENT_MODEL_PARAMS = {
+    maxTokens: 32768,  // High limit for free local models (Ollama)
+    temperature: 0.2,  // Low for code generation
+    thinking: true,    // Enable extended thinking
+} as const;
+
 // ============================================================================
 // Timeouts and Limits
 // ============================================================================

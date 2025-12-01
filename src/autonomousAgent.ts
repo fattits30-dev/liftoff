@@ -15,7 +15,8 @@ import {
     DEFAULT_PROVIDER,
     API_ENDPOINTS,
     LIMITS,
-    LLMProvider
+    LLMProvider,
+    AGENT_MODEL_PARAMS
 } from './config';
 import { buildAgentSystemPrompt } from './config/prompts';
 import { AgentType, AgentStatus } from './types/agentTypes';
@@ -335,7 +336,7 @@ export class AutonomousAgentManager {
                     for await (const chunk of this.llmProvider.streamChat(
                         agent.model,
                         agent.messages,
-                        { maxTokens: 32768, temperature: 0.2, thinking: true }
+                        AGENT_MODEL_PARAMS
                     )) {
                         if (agent.abortController?.signal.aborted) {
                             this.log(agent, 'Aborted during streaming');
