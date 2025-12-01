@@ -55,7 +55,7 @@ export class Scaffolder {
             // THREE-TIER HYBRID APPROACH:
 
             // TIER 1: Official CLI Bootstrap (0 tokens, instant, 100% reliable)
-            this.log('TIER 1: Bootstrapping with official CLIs...');
+            this.log('Bootstrapping with official CLIs...', 1);
             try {
                 await this.bootstrapWithCLI(targetDir, spec);
                 await this.validateBootstrap(targetDir, spec);
@@ -72,7 +72,7 @@ export class Scaffolder {
             }
 
             // TIER 2: Template Overlays (0 tokens, instant)
-            this.log('TIER 2: Applying template overlays...');
+            this.log('Applying template overlays...', 2);
             try {
                 await this.applyTemplateOverlays(targetDir, spec);
             } catch (error) {
@@ -88,7 +88,7 @@ export class Scaffolder {
 
             // TIER 3: AI Custom Code (200-400 tokens, 5-15s) - only if orchestrator available
             if (this.mainOrchestrator) {
-                this.log('TIER 3: Generating custom business logic with AI...');
+                this.log('Generating custom business logic with AI...', 3);
                 const scaffolderAgent = new ScaffolderAgent(
                     this.mainOrchestrator,
                     targetDir,
@@ -125,35 +125,35 @@ export class Scaffolder {
 
         // Choose CLI based on stack
         if (frontend === 'react' && bundler === 'vite') {
-            this.log('Bootstrapping with Vite + React + TypeScript...');
+            this.log('Bootstrapping with Vite + React + TypeScript...', 1);
             await this.runCommand(
                 `npm create vite@latest ${spec.name} -- --template react-ts`,
                 path.dirname(targetDir)
             );
         } else if (frontend === 'react' && bundler === 'turbopack') {
-            this.log('Bootstrapping with Next.js + Turbopack...');
+            this.log('Bootstrapping with Next.js + Turbopack...', 1);
             await this.runCommand(
                 `npx create-next-app@latest ${spec.name} --typescript --tailwind --app --yes`,
                 path.dirname(targetDir)
             );
             // Next.js auto-installs, skip npm install step
-            this.log('✓ CLI Bootstrap complete');
+            this.log('✓ CLI Bootstrap complete', 1);
             return;
         } else if (frontend === 'vue') {
-            this.log('Bootstrapping with Vue + TypeScript...');
+            this.log('Bootstrapping with Vue + TypeScript...', 1);
             await this.runCommand(
                 `npm create vue@latest ${spec.name} -- --typescript --router --yes`,
                 path.dirname(targetDir)
             );
         } else if (frontend === 'svelte') {
-            this.log('Bootstrapping with SvelteKit...');
+            this.log('Bootstrapping with SvelteKit...', 1);
             await this.runCommand(
                 `npm create svelte@latest ${spec.name} -- --template skeleton --types ts`,
                 path.dirname(targetDir)
             );
         } else {
             // Default fallback to Vite React
-            this.log('Defaulting to Vite + React + TypeScript...');
+            this.log('Defaulting to Vite + React + TypeScript...', 1);
             await this.runCommand(
                 `npm create vite@latest ${spec.name} -- --template react-ts`,
                 path.dirname(targetDir)
@@ -161,19 +161,19 @@ export class Scaffolder {
         }
 
         // Install base dependencies first
-        this.log('Installing base dependencies...');
+        this.log('Installing base dependencies...', 1);
         await this.runCommand('npm install', targetDir);
 
         // Initialize Tailwind if needed (and not Next.js which includes it)
         if (styling === 'tailwind' && bundler !== 'turbopack') {
-            this.log('Installing Tailwind CSS...');
+            this.log('Installing Tailwind CSS...', 1);
             await this.runCommand('npm install -D tailwindcss postcss autoprefixer', targetDir);
             await this.runCommand('npx tailwindcss init -p', targetDir);
         }
 
         // Initialize shadcn/ui components
         if (components === 'shadcn' && styling === 'tailwind') {
-            this.log('Installing shadcn/ui components...');
+            this.log('Installing shadcn/ui components...', 1);
 
             // Initialize shadcn/ui with defaults
             await this.runCommand('npx shadcn-ui@latest init --yes --defaults', targetDir);
@@ -190,14 +190,14 @@ export class Scaffolder {
             }
         }
 
-        this.log('✓ CLI Bootstrap complete');
+        this.log('✓ CLI Bootstrap complete', 1);
     }
 
     /**
      * TIER 2: Apply template overlays (pre-built files with variable replacement)
      */
     private async applyTemplateOverlays(targetDir: string, spec: AppSpec): Promise<void> {
-        this.log('Copying Supabase client template...');
+        this.log('Copying Supabase client template...', 2);
 
         // Ensure lib directory exists
         const libDir = path.join(targetDir, 'src', 'lib');
@@ -231,7 +231,7 @@ export const supabase = createClient(supabaseUrl, supabaseAnonKey);
 
         // Copy auth hook if auth feature enabled
         if (spec.features.includes('auth')) {
-            this.log('Copying auth hook template...');
+            this.log('Copying auth hook template...', 2);
             const hooksDir = path.join(targetDir, 'src', 'hooks');
             if (!fs.existsSync(hooksDir)) {
                 fs.mkdirSync(hooksDir, { recursive: true });
@@ -312,7 +312,7 @@ export function useAuth() {
         }
 
         // Create .env template
-        this.log('Creating .env template...');
+        this.log('Creating .env template...', 2);
         const envTemplate = `# App Configuration
 VITE_APP_NAME=${spec.name}
 
@@ -325,17 +325,17 @@ VITE_SUPABASE_ANON_KEY=your-anon-key
         fs.writeFileSync(envPath, envTemplate);
 
         // Install Supabase dependency
-        this.log('Installing @supabase/supabase-js...');
+        this.log('Installing @supabase/supabase-js...', 2);
         await this.runCommand('npm install @supabase/supabase-js', targetDir);
 
-        this.log('✓ Template overlays applied');
+        this.log('✓ Template overlays applied', 2);
     }
 
     /**
      * Validate that CLI bootstrap succeeded
      */
     private async validateBootstrap(targetDir: string, spec: AppSpec): Promise<void> {
-        this.log('Validating bootstrap...');
+        this.log('Validating bootstrap...', 1);
 
         const requiredFiles = [
             'package.json',
@@ -378,7 +378,7 @@ VITE_SUPABASE_ANON_KEY=your-anon-key
             }
         }
 
-        this.log('✓ Bootstrap validation passed');
+        this.log('✓ Bootstrap validation passed', 1);
     }
 
 
@@ -565,11 +565,18 @@ export type UpdateTables<T extends keyof Database['public']['Tables']> =
     }
 
     /**
-     * Log message to output channel
+     * Log message to output channel with formatted timestamp and optional tier label
      */
-    private log(message: string): void {
-        const timestamp = new Date().toISOString();
-        this.outputChannel.appendLine(`[${timestamp}] ${message}`);
+    private log(message: string, tier?: 1 | 2 | 3): void {
+        const now = new Date();
+        const hours = String(now.getHours()).padStart(2, '0');
+        const minutes = String(now.getMinutes()).padStart(2, '0');
+        const seconds = String(now.getSeconds()).padStart(2, '0');
+        const ms = String(now.getMilliseconds()).padStart(3, '0');
+        const timestamp = `${hours}:${minutes}:${seconds}.${ms}`;
+
+        const tierLabel = tier ? `[TIER ${tier}] ` : '';
+        this.outputChannel.appendLine(`[${timestamp}] ${tierLabel}${message}`);
     }
 
     /**
