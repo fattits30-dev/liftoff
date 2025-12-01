@@ -15,6 +15,12 @@ import { ArchitectureGenerator } from './architectureGenerator';
 import { ScaffolderAgent } from './scaffolderAgent';
 import { MainOrchestrator } from '../mainOrchestrator';
 import { validatePath } from '../utils/pathValidator';
+import {
+    Tier1BootstrapError,
+    Tier2OverlayError,
+    ValidationError,
+    TimeoutError
+} from './scaffolderErrors';
 
 export class Scaffolder {
     private outputChannel: vscode.OutputChannel;
@@ -39,44 +45,76 @@ export class Scaffolder {
     ): Promise<void> {
         this.log(`Scaffolding project: ${spec.name} at ${targetDir}`);
 
-        // 1. Create target directory
-        validatePath(targetDir, this.workspaceRoot);
-        if (!fs.existsSync(targetDir)) {
-            fs.mkdirSync(targetDir, { recursive: true });
+        try {
+            // 1. Create target directory
+            validatePath(targetDir, this.workspaceRoot);
+            if (!fs.existsSync(targetDir)) {
+                fs.mkdirSync(targetDir, { recursive: true });
+            }
+
+            // THREE-TIER HYBRID APPROACH:
+
+            // TIER 1: Official CLI Bootstrap (0 tokens, instant, 100% reliable)
+            this.log('TIER 1: Bootstrapping with official CLIs...');
+            try {
+                await this.bootstrapWithCLI(targetDir, spec);
+                await this.validateBootstrap(targetDir, spec);
+            } catch (error) {
+                if (error instanceof Tier1BootstrapError || error instanceof ValidationError) {
+                    throw error;
+                }
+                throw new Tier1BootstrapError(
+                    'Bootstrap failed',
+                    'unknown',
+                    undefined,
+                    error instanceof Error ? error.message : String(error)
+                );
+            }
+
+            // TIER 2: Template Overlays (0 tokens, instant)
+            this.log('TIER 2: Applying template overlays...');
+            try {
+                await this.applyTemplateOverlays(targetDir, spec);
+            } catch (error) {
+                if (error instanceof Tier2OverlayError) {
+                    throw error;
+                }
+                throw new Tier2OverlayError(
+                    'Template overlay failed',
+                    undefined,
+                    'create'
+                );
+            }
+
+            // TIER 3: AI Custom Code (200-400 tokens, 5-15s) - only if orchestrator available
+            if (this.mainOrchestrator) {
+                this.log('TIER 3: Generating custom business logic with AI...');
+                const scaffolderAgent = new ScaffolderAgent(
+                    this.mainOrchestrator,
+                    targetDir,
+                    this.extensionPath
+                );
+                await scaffolderAgent.generateCustomFeatures(spec, architecture);
+            }
+
+            // Post-processing: Database types and migrations
+            this.log('Generating database types...');
+            await this.generateDatabaseTypes(targetDir, spec.entities);
+
+            this.log('Generating database migration...');
+            const archGenerator = new ArchitectureGenerator();
+            const migrationSQL = archGenerator.generateMigrationSQL(architecture.database);
+            await this.writeMigration(targetDir, migrationSQL);
+
+            this.log('Scaffolding complete!');
+        } catch (error) {
+            this.log(`ERROR: Scaffolding failed - ${error instanceof Error ? error.message : String(error)}`);
+
+            // Attempt rollback on failure
+            await this.rollbackScaffold(targetDir);
+
+            throw error;
         }
-
-        // THREE-TIER HYBRID APPROACH:
-
-        // TIER 1: Official CLI Bootstrap (0 tokens, instant, 100% reliable)
-        this.log('TIER 1: Bootstrapping with official CLIs...');
-        await this.bootstrapWithCLI(targetDir, spec);
-        await this.validateBootstrap(targetDir, spec);
-
-        // TIER 2: Template Overlays (0 tokens, instant)
-        this.log('TIER 2: Applying template overlays...');
-        await this.applyTemplateOverlays(targetDir, spec);
-
-        // TIER 3: AI Custom Code (200-400 tokens, 5-15s) - only if orchestrator available
-        if (this.mainOrchestrator) {
-            this.log('TIER 3: Generating custom business logic with AI...');
-            const scaffolderAgent = new ScaffolderAgent(
-                this.mainOrchestrator,
-                targetDir,
-                this.extensionPath
-            );
-            await scaffolderAgent.generateCustomFeatures(spec, architecture);
-        }
-
-        // Post-processing: Database types and migrations
-        this.log('Generating database types...');
-        await this.generateDatabaseTypes(targetDir, spec.entities);
-
-        this.log('Generating database migration...');
-        const archGenerator = new ArchitectureGenerator();
-        const migrationSQL = archGenerator.generateMigrationSQL(architecture.database);
-        await this.writeMigration(targetDir, migrationSQL);
-
-        this.log('Scaffolding complete!');
     }
 
     /**
@@ -181,7 +219,15 @@ export const supabase = createClient(supabaseUrl, supabaseAnonKey);
 `;
         const supabasePath = path.join(libDir, 'supabase.ts');
         validatePath(supabasePath, this.workspaceRoot);
-        fs.writeFileSync(supabasePath, supabaseTemplate);
+        try {
+            fs.writeFileSync(supabasePath, supabaseTemplate);
+        } catch (error) {
+            throw new Tier2OverlayError(
+                'Failed to write Supabase client template',
+                supabasePath,
+                'write'
+            );
+        }
 
         // Copy auth hook if auth feature enabled
         if (spec.features.includes('auth')) {
@@ -307,7 +353,12 @@ VITE_SUPABASE_ANON_KEY=your-anon-key
         for (const file of requiredFiles) {
             const filePath = path.join(targetDir, file);
             if (!fs.existsSync(filePath)) {
-                throw new Error(`Bootstrap failed: ${file} not found. CLI may have failed.`);
+                throw new ValidationError(
+                    `Bootstrap failed: ${file} not found. CLI may have failed.`,
+                    'file',
+                    file,
+                    'missing'
+                );
             }
         }
 
@@ -318,7 +369,12 @@ VITE_SUPABASE_ANON_KEY=your-anon-key
         const requiredDeps = ['react', 'react-dom'];
         for (const dep of requiredDeps) {
             if (!packageJson.dependencies?.[dep] && !packageJson.devDependencies?.[dep]) {
-                throw new Error(`Bootstrap incomplete: ${dep} not installed`);
+                throw new ValidationError(
+                    `Bootstrap incomplete: ${dep} not installed`,
+                    'dependency',
+                    dep,
+                    'missing'
+                );
             }
         }
 
@@ -489,6 +545,25 @@ export type UpdateTables<T extends keyof Database['public']['Tables']> =
     }
 
 
+
+    /**
+     * Rollback/cleanup failed scaffold attempt
+     */
+    private async rollbackScaffold(targetDir: string): Promise<void> {
+        try {
+            this.log('Rolling back failed scaffold...');
+
+            if (fs.existsSync(targetDir)) {
+                // Remove the partially created project directory
+                fs.rmSync(targetDir, { recursive: true, force: true });
+                this.log('Rollback complete - cleaned up target directory');
+            }
+        } catch (rollbackError) {
+            this.log(`Rollback failed: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`);
+            // Don't throw rollback errors - original error is more important
+        }
+    }
+
     /**
      * Log message to output channel
      */
@@ -498,24 +573,47 @@ export type UpdateTables<T extends keyof Database['public']['Tables']> =
     }
 
     /**
-     * Run shell command in directory
+     * Run shell command in directory with timeout
      */
-    async runCommand(command: string, cwd: string): Promise<void> {
+    async runCommand(
+        command: string,
+        cwd: string,
+        timeoutMs: number = 300000 // 5 minutes default
+    ): Promise<void> {
         return new Promise((resolve, reject) => {
             const { exec } = require('child_process');
 
             this.log(`Running: ${command}`);
 
-            exec(command, { cwd }, (error: Error | null, stdout: string, stderr: string) => {
+            const child = exec(command, { cwd }, (error: Error | null, stdout: string, stderr: string) => {
                 if (stdout) this.log(stdout);
                 if (stderr) this.log(stderr);
 
                 if (error) {
-                    reject(error);
+                    const bootstrapError = new Tier1BootstrapError(
+                        `Command failed: ${command}`,
+                        command,
+                        (error as any).code,
+                        stderr
+                    );
+                    reject(bootstrapError);
                 } else {
                     resolve();
                 }
             });
+
+            // Set timeout
+            const timeout = setTimeout(() => {
+                child.kill('SIGTERM');
+                reject(new TimeoutError(
+                    `Command timed out after ${timeoutMs}ms`,
+                    command,
+                    timeoutMs
+                ));
+            }, timeoutMs);
+
+            // Clear timeout on completion
+            child.on('exit', () => clearTimeout(timeout));
         });
     }
 
