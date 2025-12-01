@@ -147,6 +147,69 @@
     "configuration": {
       "title": "Liftoff",
       "properties": {
+        "liftoff.llmProvider": {
+          "type": "string",
+          "default": "ollama",
+          "enum": ["ollama", "huggingface"],
+          "enumDescriptions": [
+            "Ollama - Local LLM (free, private, fast)",
+            "HuggingFace - Cloud API (requires API key)"
+          ],
+          "description": "LLM provider to use. Ollama recommended for local development."
+        },
+        "liftoff.ollamaBaseUrl": {
+          "type": "string",
+          "default": "http://localhost:11434",
+          "description": "Ollama API base URL (only used if provider is 'ollama')"
+        },
+        "liftoff.ollamaModel": {
+          "type": "string",
+          "default": "deepseek-v3.1:671b-cloud",
+          "enum": [
+            "deepseek-v3.1:671b-cloud",
+            "qwen3-coder:480b-cloud",
+            "gpt-oss:120b-cloud",
+            "deepseek-r1:8b",
+            "qwen2.5-coder:7b-instruct-q5_K_M",
+            "deepseek-coder:6.7b",
+            "qwen2.5-coder:7b",
+            "codellama:7b"
+          ],
+          "enumDescriptions": [
+            "DeepSeek V3.1 671B Cloud - Best for coding (RECOMMENDED)",
+            "Qwen3 Coder 480B Cloud - Largest coder model",
+            "GPT-OSS 120B Cloud - OpenAI-style model",
+            "DeepSeek R1 8B - LOCAL, reasoning model",
+            "Qwen 2.5 Coder 7B Instruct - LOCAL, balanced",
+            "DeepSeek Coder 6.7B - LOCAL, fast",
+            "Qwen 2.5 Coder 7B - LOCAL, balanced",
+            "CodeLlama 7B - LOCAL, Meta's model"
+          ],
+          "description": "Default Ollama model for orchestrator (cloud recommended for planning)"
+        },
+        "liftoff.ollamaAgentModel": {
+          "type": "string",
+          "default": "deepseek-v3.1:671b-cloud",
+          "enum": [
+            "deepseek-v3.1:671b-cloud",
+            "qwen3-coder:480b-cloud",
+            "deepseek-r1:8b",
+            "qwen2.5-coder:7b-instruct-q5_K_M",
+            "deepseek-coder:6.7b",
+            "qwen2.5-coder:7b",
+            "codellama:7b"
+          ],
+          "enumDescriptions": [
+            "DeepSeek V3.1 671B Cloud - Best quality (RECOMMENDED for agents)",
+            "Qwen3 Coder 480B Cloud - Largest (slowest)",
+            "DeepSeek R1 8B - LOCAL, reasoning model",
+            "Qwen 2.5 Coder 7B Instruct - LOCAL, balanced",
+            "DeepSeek Coder 6.7B - LOCAL, fast",
+            "Qwen 2.5 Coder 7B - LOCAL, balanced",
+            "CodeLlama 7B - LOCAL, Meta's model"
+          ],
+          "description": "Ollama model for agents - use 671B cloud for best code quality"
+        },
         "liftoff.defaultModel": {
           "type": "string",
           "default": "deepseek-ai/DeepSeek-V3-0324",
@@ -164,7 +227,7 @@
             "Qwen 72B - Good balance",
             "Llama 3.3 70B - Meta's flagship"
           ],
-          "description": "Model for agents. DeepSeek-V3 recommended."
+          "description": "HuggingFace model (only if provider is 'huggingface')"
         },
         "liftoff.autoHandoff": {
           "type": "boolean",

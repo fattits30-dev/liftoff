@@ -354,6 +354,21 @@ function togglePlaywright(show) {
     document.getElementById('playwrightPanel').classList.toggle('hidden', !show);
 }
 
+let showThinking = true; // Thinking enabled by default
+
+function toggleThinking() {
+    showThinking = !showThinking;
+    const btn = document.getElementById('thinkingToggle');
+    btn.style.background = showThinking ? 'rgba(100,149,237,0.2)' : 'rgba(128,128,128,0.1)';
+    btn.title = showThinking ? 'Hide Thinking Output' : 'Show Thinking Output';
+
+    // Toggle visibility of thought messages
+    const thoughts = document.querySelectorAll('.message-assistant');
+    thoughts.forEach(thought => {
+        thought.style.display = showThinking ? 'block' : 'none';
+    });
+}
+
 function setStatus(status, text) {
     document.getElementById('statusIndicator').className = 'status-indicator ' + status;
     document.getElementById('statusText').textContent = text;

@@ -25,9 +25,17 @@
 
 import * as vscode from 'vscode';
 import { HuggingFaceProvider } from './hfProvider';
+import { OllamaProvider } from './ollamaProvider';
 import { AutonomousAgentManager, Agent } from './autonomousAgent';
 import { SemanticMemoryStore, OrchestratorMemory } from './memory/agentMemory';
-import { DEFAULT_CLOUD_MODEL_NAME, LIMITS } from './config';
+import {
+    DEFAULT_CLOUD_MODEL_NAME,
+    DEFAULT_OLLAMA_MODEL_NAME,
+    DEFAULT_PROVIDER,
+    API_ENDPOINTS,
+    LIMITS,
+    LLMProvider
+} from './config';
 import { AgentType } from './types/agentTypes';
 import { getMcpRouter } from './mcp';
 import { AppBuilderOrchestrator } from './appBuilder/appBuilderOrchestrator';
@@ -290,7 +298,8 @@ Now generating system architecture from spec...
  * MainOrchestrator - Plans and delegates to specialized agents
  */
 export class MainOrchestrator {
-    private hfProvider: HuggingFaceProvider | null = null;
+    private llmProvider: HuggingFaceProvider | OllamaProvider | null = null;
+    private providerType: LLMProvider = DEFAULT_PROVIDER;
     private agentManager: AutonomousAgentManager | null = null;
     private messages: Message[] = [];
     private outputChannel: vscode.OutputChannel;
@@ -302,7 +311,7 @@ export class MainOrchestrator {
 
     // Retry tracking: task -> attempt count
     private retryTracker: Map<string, number> = new Map();
-    
+
     // TODO list for tasks that failed after max retries
     private todoList: TodoItem[] = [];
 
@@ -320,7 +329,9 @@ export class MainOrchestrator {
     private readonly STREAM_FLUSH_MS = 50; // Flush every 50ms for smooth display
 
     private config = {
-        cloudModel: DEFAULT_CLOUD_MODEL_NAME,
+        cloudModel: DEFAULT_CLOUD_MODEL_NAME as string,
+        ollamaModel: DEFAULT_OLLAMA_MODEL_NAME as string,
+        provider: DEFAULT_PROVIDER as LLMProvider,
         maxIterations: LIMITS.orchestratorMaxIterations,
     };
 
@@ -397,12 +408,43 @@ export class MainOrchestrator {
     }
 
     async setApiKey(apiKey: string): Promise<void> {
-        this.hfProvider = new HuggingFaceProvider(apiKey);
+        // Get provider preference from settings
+        const config = vscode.workspace.getConfiguration('liftoff');
+        this.providerType = config.get<LLMProvider>('llmProvider', DEFAULT_PROVIDER);
+
+        if (this.providerType === 'ollama') {
+            // Use Ollama - no API key needed
+            const ollamaBaseUrl = config.get<string>('ollamaBaseUrl', API_ENDPOINTS.ollama);
+            const ollamaModel = config.get<string>('ollamaModel', DEFAULT_OLLAMA_MODEL_NAME);
+
+            this.llmProvider = new OllamaProvider(ollamaBaseUrl, ollamaModel);
+            this.config.ollamaModel = ollamaModel;
+
+            this.log(`🦙 Using Ollama provider at ${ollamaBaseUrl} with model ${ollamaModel}`);
+
+            // Check if Ollama is running
+            const isRunning = await (this.llmProvider as OllamaProvider).healthCheck();
+            if (!isRunning) {
+                vscode.window.showWarningMessage(
+                    'Ollama is not running or not accessible. Please start Ollama or switch to HuggingFace provider.',
+                    'Switch to HuggingFace'
+                ).then(choice => {
+                    if (choice === 'Switch to HuggingFace') {
+                        config.update('llmProvider', 'huggingface', vscode.ConfigurationTarget.Global);
+                    }
+                });
+                throw new Error('Ollama is not accessible');
+            }
+        } else {
+            // Use HuggingFace cloud provider
+            this.llmProvider = new HuggingFaceProvider(apiKey);
+            this.log('☁️ Using HuggingFace cloud provider');
+        }
 
         // Initialize MCP router with tools
         await this.initializeMcpTools();
 
-        this.log('API key configured');
+        this.log('LLM provider configured');
     }
 
     /**
@@ -490,8 +532,8 @@ export class MainOrchestrator {
      * Main entry point - process user task
      */
     async chat(userMessage: string): Promise<string> {
-        if (!this.hfProvider) {
-            return "❌ Please set your API key first.";
+        if (!this.llmProvider) {
+            return "❌ Please configure LLM provider first (Ollama or HuggingFace).";
         }
         if (!this.agentManager) {
             return "❌ Agent manager not connected.";
@@ -517,6 +559,38 @@ export class MainOrchestrator {
         } catch (err: any) {
             this.setStatus('error');
             return `❌ Error: ${err.message}`;
+        }
+    }
+
+    /**
+     * Public API for AppBuilder to delegate tasks directly to agents
+     * Bypasses the chat/planning interface for direct task execution
+     */
+    async delegateTask(agent: AgentType, task: string): Promise<{ success: boolean; message: string; error?: string }> {
+        if (!this.llmProvider) {
+            return {
+                success: false,
+                message: "❌ LLM provider not configured",
+                error: "LLM provider not configured"
+            };
+        }
+        if (!this.agentManager) {
+            return {
+                success: false,
+                message: "❌ Agent manager not connected",
+                error: "Agent manager not connected"
+            };
+        }
+
+        try {
+            // Use the existing delegation infrastructure
+            return await this.executeDelegation({ agent, task });
+        } catch (err: any) {
+            return {
+                success: false,
+                message: `❌ Delegation failed: ${err.message}`,
+                error: err.message
+            };
         }
     }
 
@@ -661,8 +735,11 @@ export class MainOrchestrator {
         this.log(`Target directory: ${targetDir}`);
 
         // Create AppBuilderOrchestrator and run
-        const extensionPath = vscode.extensions.getExtension('anthropic.liftoff')?.extensionPath || '';
-        const appBuilder = new AppBuilderOrchestrator(extensionPath, this);
+        const extensionPath = vscode.extensions.getExtension('jamie.liftoff')?.extensionPath || '';
+        if (!extensionPath) {
+            this.log('⚠️ Warning: Could not find extension path, using workspace root');
+        }
+        const appBuilder = new AppBuilderOrchestrator(extensionPath || this.workspaceRoot, this);
 
         this._onThought.fire('\n📋 **ENTERING APP BUILDER MODE**\n');
         this._onThought.fire('Following structured workflow: SPEC → ARCHITECTURE → SCAFFOLD → IMPLEMENT → TEST → DEPLOY\n\n');
@@ -761,14 +838,19 @@ export class MainOrchestrator {
      * Think = make one LLM call to the planner
      */
     private async think(): Promise<string> {
-        if (!this.hfProvider) return '';
+        if (!this.llmProvider) return '';
 
         let response = '';
         this._onThought.fire('\n🧠 Planning...');
 
+        // Get the appropriate model based on provider type
+        const model = this.providerType === 'ollama'
+            ? this.config.ollamaModel
+            : this.config.cloudModel;
+
         try {
-            for await (const chunk of this.hfProvider.streamChat(
-                this.config.cloudModel,
+            for await (const chunk of this.llmProvider.streamChat(
+                model,
                 this.messages.map(m => ({ role: m.role, content: m.content })),
                 { maxTokens: 1500, temperature: 0.3 }
             )) {
@@ -811,7 +893,7 @@ export class MainOrchestrator {
     /**
      * Execute a delegation - spawn agent and wait for completion
      */
-    private async executeDelegation(delegation: { agent: AgentType; task: string }): Promise<{ success: boolean; message: string }> {
+    private async executeDelegation(delegation: { agent: AgentType; task: string }): Promise<{ success: boolean; message: string; error?: string }> {
         const taskKey = `${delegation.agent}:${delegation.task.substring(0, 50)}`;
         const attempts = (this.retryTracker.get(taskKey) || 0) + 1;
         this.retryTracker.set(taskKey, attempts);
@@ -826,9 +908,11 @@ export class MainOrchestrator {
 
             // If still full, fail gracefully
             if (this.activeAgents.size >= this.MAX_CONCURRENT_AGENTS) {
+                const errorMsg = `Too many concurrent agents (${this.activeAgents.size}). Please wait for current tasks to complete before delegating more work.`;
                 return {
                     success: false,
-                    message: `⚠️ Too many concurrent agents (${this.activeAgents.size}). Please wait for current tasks to complete before delegating more work.`
+                    message: `⚠️ ${errorMsg}`,
+                    error: errorMsg
                 };
             }
         }
@@ -873,12 +957,13 @@ export class MainOrchestrator {
                 };
             } else {
                 // Failed - check retry count
+                const errorMsg = result.error || 'Unknown error';
                 if (attempts >= MAX_RETRIES) {
                     // Max retries reached - add to TODO
                     const todo: TodoItem = {
                         task: delegation.task,
                         agentType: delegation.agent,
-                        error: result.error || 'Unknown error',
+                        error: errorMsg,
                         attempts,
                         timestamp: new Date()
                     };
@@ -888,23 +973,28 @@ export class MainOrchestrator {
 
                     return {
                         success: false,
-                        message: `⚠️ Agent ${delegation.agent} failed after ${MAX_RETRIES} attempts.\nTask added to TODO list: "${delegation.task}"\nError: ${result.error}\n\nContinue with other tasks or mark complete.`
+                        message: `⚠️ Agent ${delegation.agent} failed after ${MAX_RETRIES} attempts.\nTask added to TODO list: "${delegation.task}"\nError: ${errorMsg}\n\nContinue with other tasks or mark complete.`,
+                        error: errorMsg
                     };
                 } else {
                     // Can retry
                     this._onThought.fire(`\n❌ Failed (attempt ${attempts}/${MAX_RETRIES}) - will retry`);
                     return {
                         success: false,
-                        message: `❌ Agent ${delegation.agent} failed (attempt ${attempts}/${MAX_RETRIES}).\nError: ${result.error}\n\nYou can:\n1. Retry with same approach\n2. Try a different approach\n3. Delegate to different agent\n4. Skip and continue`
+                        message: `❌ Agent ${delegation.agent} failed (attempt ${attempts}/${MAX_RETRIES}).\nError: ${errorMsg}\n\nYou can:\n1. Retry with same approach\n2. Try a different approach\n3. Delegate to different agent\n4. Skip and continue`,
+                        error: errorMsg
                     };
                 }
             }
         } catch (err: any) {
-            this.log(`Delegation error: ${err.message}`);
+            const errorMsg = err.message || String(err);
+            this.log(`⚠️ Delegation error: ${errorMsg}`);
+            this.log(`Stack trace: ${err.stack || 'No stack trace'}`);
             // Note: Agent may not have been added to activeAgents if spawn failed
             return {
                 success: false,
-                message: `❌ Failed to spawn agent: ${err.message}`
+                message: `❌ Failed to spawn agent: ${errorMsg}`,
+                error: errorMsg
             };
         }
     }

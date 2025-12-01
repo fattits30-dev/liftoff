@@ -49,16 +49,17 @@ export class AppBuilderOrchestrator {
     private outputChannel: vscode.OutputChannel;
     private statusBarItem: vscode.StatusBarItem;
     private liftoffPlan?: LiftoffPlan;
+    private webview?: vscode.WebviewPanel;
 
     constructor(
         extensionPath: string,
         mainOrchestrator?: MainOrchestrator
     ) {
-        this.specGenerator = new SpecGenerator();
-        this.architectureGenerator = new ArchitectureGenerator();
-        this.scaffolder = new Scaffolder(extensionPath);
-        this.stateManager = new BuildStateManager();
         this.mainOrchestrator = mainOrchestrator;
+        this.specGenerator = new SpecGenerator(mainOrchestrator);  // Pass orchestrator for AI-driven stack research
+        this.architectureGenerator = new ArchitectureGenerator();
+        this.scaffolder = new Scaffolder(extensionPath, mainOrchestrator);  // Pass orchestrator for AI scaffolding
+        this.stateManager = new BuildStateManager();
 
         this.outputChannel = vscode.window.createOutputChannel('Liftoff Builder');
         this.statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
@@ -97,96 +98,56 @@ export class AppBuilderOrchestrator {
             // PHASE 1: Specification
             this.liftoffPlan = updatePhaseStatus(this.liftoffPlan, 'spec', 'in-progress');
             await this.saveLiftoffPlan(targetDir);
-            this.setPhase('spec', 'Gathering requirements...');
+            this.setPhase('spec', 'Analyzing requirements...');
             const spec = await this.runSpecPhase(description);
             if (!spec) {
                 return this.buildError('Spec generation cancelled');
             }
             this.buildState.spec = spec;
-            await this.saveState(targetDir);
-
-            // Update .liftoff: spec phase complete
             this.liftoffPlan = updatePhaseStatus(this.liftoffPlan, 'spec', 'complete');
             this.liftoffPlan.artifacts.specFile = path.join(targetDir, 'liftoff.spec.json');
             await this.saveLiftoffPlan(targetDir);
-            this.log('spec', '✅ Spec phase complete - moving to architecture', 'completed');
 
             // PHASE 2: Architecture
             this.liftoffPlan = updatePhaseStatus(this.liftoffPlan, 'architecture', 'in-progress');
             await this.saveLiftoffPlan(targetDir);
-            this.setPhase('architecture', 'Designing architecture...');
+            this.setPhase('architecture', 'Designing system...');
             const architecture = await this.runArchitecturePhase(spec);
             this.buildState.architecture = architecture;
-            await this.saveState(targetDir);
-
-            // Update .liftoff: architecture phase complete
             this.liftoffPlan = updatePhaseStatus(this.liftoffPlan, 'architecture', 'complete');
             this.liftoffPlan.artifacts.archFile = path.join(targetDir, 'liftoff.architecture.json');
             await this.saveLiftoffPlan(targetDir);
-            this.log('architecture', '✅ Architecture phase complete - moving to scaffold', 'completed');
 
             // PHASE 3: Scaffold
             this.liftoffPlan = updatePhaseStatus(this.liftoffPlan, 'scaffold', 'in-progress');
             await this.saveLiftoffPlan(targetDir);
-            this.setPhase('scaffold', 'Creating project structure...');
+            this.setPhase('scaffold', 'Setting up project...');
             await this.runScaffoldPhase(targetDir, spec, architecture);
             this.buildState.projectPath = targetDir;
-            await this.saveState(targetDir);
-
-            // Update .liftoff: scaffold phase complete
             this.liftoffPlan = updatePhaseStatus(this.liftoffPlan, 'scaffold', 'complete');
             await this.saveLiftoffPlan(targetDir);
-            this.log('scaffold', '✅ Scaffold phase complete - moving to implementation', 'completed');
 
             // PHASE 4: Implementation
             this.liftoffPlan = updatePhaseStatus(this.liftoffPlan, 'implement', 'in-progress');
             await this.saveLiftoffPlan(targetDir);
-            this.setPhase('implement', 'Building features...');
+            this.setPhase('implement', 'Writing code...');
             await this.runImplementationPhase(targetDir, spec, architecture);
-            await this.saveState(targetDir);
-
-            // Update .liftoff: implement phase complete
             this.liftoffPlan = updatePhaseStatus(this.liftoffPlan, 'implement', 'complete');
             await this.saveLiftoffPlan(targetDir);
-            this.log('implement', '✅ Implementation phase complete', 'completed');
 
-            // PHASE 5: Testing (optional)
-            const runTests = await vscode.window.showQuickPick(
-                ['Yes, run tests', 'Skip tests'],
-                { placeHolder: 'Run tests before deployment?' }
-            );
-
-            if (runTests === 'Yes, run tests') {
-                this.setPhase('test', 'Running tests...');
-                await this.runTestPhase(targetDir);
-            }
-
-            // PHASE 6: Deployment (optional)
-            const deploy = await vscode.window.showQuickPick(
-                ['Deploy now', 'Deploy later'],
-                { placeHolder: 'Deploy to production?' }
-            );
-
-            let deployUrl: string | undefined;
-            if (deploy === 'Deploy now') {
-                this.setPhase('deploy', 'Deploying...');
-                deployUrl = await this.runDeployPhase(targetDir, spec);
-            }
-
-            // Complete!
-            this.log('complete', 'Build complete!', 'completed');
+            // Complete! Skip tests and deployment for now
+            this.log('complete', '✅ Build complete!', 'completed');
             this.statusBarItem.text = '$(check) Liftoff: Complete';
 
             // Show summary
-            await this.showBuildSummary(spec, architecture, targetDir, deployUrl);
+            await this.showBuildSummary(spec, architecture, targetDir);
 
             return {
                 success: true,
                 projectPath: targetDir,
                 spec,
                 architecture,
-                todoItems: this.buildState.todoItems,
-                deployUrl
+                todoItems: this.buildState.todoItems
             };
 
         } catch (error) {
@@ -252,56 +213,10 @@ export class AppBuilderOrchestrator {
      * Phase 1: Generate spec from description + user input
      */
     private async runSpecPhase(description: string): Promise<AppSpec | null> {
-        // First, infer from description
-        const inferred = await this.specGenerator.generateSpecFromDescription(description);
-
-        // Show what we inferred and let user confirm/modify
-        const useInferred = await vscode.window.showQuickPick(
-            ['Use inferred settings', 'Customize settings'],
-            {
-                placeHolder: `Inferred: ${inferred.type} app with ${inferred.features?.join(', ')} features`
-            }
-        );
-
-        if (useInferred === 'Customize settings') {
-            // Run full interactive spec gathering
-            return await this.specGenerator.gatherSpec();
+        const spec = await this.specGenerator.generateSpecFromDescription(description);
+        if (!spec) {
+            return null;
         }
-
-        // Get minimal required info
-        const appName = await vscode.window.showInputBox({
-            prompt: 'App name (lowercase, no spaces)',
-            placeHolder: 'my-app',
-            validateInput: (value) => {
-                if (!/^[a-z][a-z0-9-]*$/.test(value)) {
-                    return 'Must be lowercase, start with letter, only letters/numbers/hyphens';
-                }
-                return null;
-            }
-        });
-
-        if (!appName) return null;
-
-        // Build complete spec from inferred + user input
-        const spec: AppSpec = {
-            name: appName,
-            displayName: this.toTitleCase(appName),
-            description,
-            version: '0.1.0',
-            type: inferred.type || 'saas',
-            features: inferred.features || ['auth', 'database'],
-            entities: this.getDefaultEntities(inferred.type || 'saas'),
-            pages: this.getDefaultPages(inferred.type || 'saas', inferred.features || []),
-            stack: inferred.stack || {
-                frontend: 'react',
-                styling: 'tailwind',
-                components: 'shadcn',
-                backend: 'supabase',
-                hosting: 'vercel'
-            }
-        };
-
-        this.log('spec', `Generated spec: ${spec.name} (${spec.type})`, 'completed');
         return spec;
     }
 
@@ -310,11 +225,6 @@ export class AppBuilderOrchestrator {
      */
     private async runArchitecturePhase(spec: AppSpec): Promise<Architecture> {
         const architecture = this.architectureGenerator.generateArchitecture(spec);
-
-        this.log('architecture', `Database: ${architecture.database.tables.length} tables`, 'completed');
-        this.log('architecture', `Components: ${architecture.components.pages.length} pages`, 'completed');
-        this.log('architecture', `API Routes: ${architecture.apiRoutes.length} endpoints`, 'completed');
-
         return architecture;
     }
 
@@ -327,20 +237,7 @@ export class AppBuilderOrchestrator {
         architecture: Architecture
     ): Promise<void> {
         await this.scaffolder.scaffold(targetDir, spec, architecture);
-
-        this.log('scaffold', `Project scaffolded at ${targetDir}`, 'completed');
-
-        // Ask about npm install
-        const installDeps = await vscode.window.showQuickPick(
-            ['Yes, install now', 'No, I\'ll do it later'],
-            { placeHolder: 'Install dependencies (npm install)?' }
-        );
-
-        if (installDeps === 'Yes, install now') {
-            this.log('scaffold', 'Installing dependencies...', 'started');
-            await this.scaffolder.installDependencies(targetDir);
-            this.log('scaffold', 'Dependencies installed', 'completed');
-        }
+        await this.scaffolder.installDependencies(targetDir);
     }
 
     /**
@@ -362,58 +259,227 @@ export class AppBuilderOrchestrator {
             }
         }
 
-        this.log('implement', `Building ${featureTasks.length} tasks...`);
+        this.log('implement', `Building ${featureTasks.length} tasks using AI agents...`);
 
         let completedCount = 0;
+        let failedCount = 0;
         const totalCount = featureTasks.length;
 
         for (const task of featureTasks) {
-            this.statusBarItem.text = `$(sync~spin) Building: ${task.name} (${completedCount}/${totalCount})`;
+            this.statusBarItem.text = `$(sync~spin) ${task.name} (${completedCount}/${totalCount})`;
 
             try {
-                // If we have an orchestrator, delegate to agents
                 if (this.mainOrchestrator) {
                     const contextPrompt = this.buildTaskPrompt(task, targetDir);
-                    await this.mainOrchestrator.chat(contextPrompt);
+                    const result = await this.mainOrchestrator.delegateTask(task.agent, contextPrompt);
+
+                    if (result.success) {
+                        completedCount++;
+                    } else {
+                        failedCount++;
+                        const errorDetail = result.error || result.message || 'Unknown error';
+                        // Only log failures
+                        this.outputChannel.appendLine(`[❌] ${task.name}: ${errorDetail}`);
+                        this.buildState.todoItems.push(`[FAILED] ${task.name}: ${errorDetail}`);
+                    }
                 } else {
-                    // Otherwise, just log as TODO
                     this.buildState.todoItems.push(`[${task.agent}] ${task.name}: ${task.prompt}`);
+                    completedCount++;
                 }
-
-                completedCount++;
-                this.log('implement', `Completed: ${task.name}`, 'completed');
-
             } catch (error) {
+                failedCount++;
                 const errorMessage = error instanceof Error ? error.message : String(error);
-                this.log('implement', `Failed: ${task.name} - ${errorMessage}`, 'failed');
-
-                // Add to TODO list for manual completion
-                this.buildState.todoItems.push(`[FAILED] ${task.name}: ${task.prompt}`);
+                this.outputChannel.appendLine(`[❌] ${task.name}: ${errorMessage}`);
+                this.buildState.todoItems.push(`[FAILED] ${task.name}: ${task.prompt} - Error: ${errorMessage}`);
             }
         }
 
-        this.log('implement', `Completed ${completedCount}/${totalCount} tasks`, 'completed');
+        const summary = `Completed ${completedCount}/${totalCount} tasks` +
+                       (failedCount > 0 ? ` (${failedCount} failed)` : '');
+        this.log('implement', summary, failedCount > 0 ? 'failed' : 'completed');
+    }
+
+    /**
+     * Build rich context for task execution
+     */
+    private buildTaskContext(spec: AppSpec, architecture: Architecture): string {
+        // Map PostgreSQL types to TypeScript types
+        const pgToTs = (pgType: string): string => {
+            const typeMap: Record<string, string> = {
+                'uuid': 'string',
+                'text': 'string',
+                'varchar': 'string',
+                'integer': 'number',
+                'bigint': 'number',
+                'boolean': 'boolean',
+                'timestamp': 'string',
+                'timestamptz': 'string',
+                'jsonb': 'any',
+                'json': 'any'
+            };
+            return typeMap[pgType.toLowerCase()] || 'any';
+        };
+
+        // Convert to PascalCase
+        const toPascalCase = (str: string): string => {
+            return str.split(/[-_]/).map(word =>
+                word.charAt(0).toUpperCase() + word.slice(1).toLowerCase()
+            ).join('');
+        };
+
+        // Build entity type definitions
+        const entityTypes = architecture.database.tables
+            .map(table => {
+                const typeName = toPascalCase(table.name);
+                const fields = table.columns
+                    .map(col => `  ${col.name}${col.nullable ? '?' : ''}: ${pgToTs(col.type)};`)
+                    .join('\n');
+
+                return `type ${typeName} = {\n${fields}\n}`;
+            })
+            .join('\n\n');
+
+        // Build available imports
+        const imports = [
+            "import { supabase } from '@/lib/supabase';",
+            "import { useAuth } from '@/hooks/useAuth';",
+            "import { useState, useEffect } from 'react';",
+            spec.stack.styling === 'tailwind' ? "// Tailwind CSS classes available" : "",
+            "import { Button } from '@/components/ui/button';",
+            "import { Input } from '@/components/ui/input';",
+            "import { Card } from '@/components/ui/card';"
+        ].filter(Boolean).join('\n');
+
+        return `## Project Context
+
+**Stack:**
+- Frontend: ${spec.stack.frontend}
+- Bundler: ${spec.stack.bundler || 'vite'}
+- Styling: ${spec.stack.styling}
+- Backend: ${spec.stack.backend}
+- Auth: ${spec.stack.auth || 'supabase-auth'}
+
+**Available Imports:**
+\`\`\`typescript
+${imports}
+\`\`\`
+
+## Entity Type Definitions
+
+\`\`\`typescript
+${entityTypes}
+\`\`\`
+
+## Database Tables
+
+${architecture.database.tables.map(table => `
+**${table.name}:**
+- Primary Key: ${table.primaryKey}
+- Columns: ${table.columns.map(c => `${c.name} (${c.type}${c.nullable ? ', nullable' : ''})`).join(', ')}
+`).join('\n')}
+
+## Code Pattern Examples
+
+**Fetching data from Supabase:**
+\`\`\`tsx
+import { supabase } from '@/lib/supabase';
+import { useState, useEffect } from 'react';
+
+export function ExampleListPage() {
+  const [items, setItems] = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    async function fetchData() {
+      const { data, error } = await supabase
+        .from('table_name')
+        .select('*')
+        .order('created_at', { ascending: false });
+
+      if (error) {
+        console.error('Error:', error);
+      } else if (data) {
+        setItems(data);
+      }
+      setLoading(false);
+    }
+    fetchData();
+  }, []);
+
+  if (loading) return <div>Loading...</div>;
+
+  return (
+    <div className="space-y-4">
+      {items.map(item => (
+        <Card key={item.id}>
+          {/* Render item */}
+        </Card>
+      ))}
+    </div>
+  );
+}
+\`\`\`
+
+**Creating/updating data:**
+\`\`\`tsx
+async function handleSubmit(formData: any) {
+  const { data, error } = await supabase
+    .from('table_name')
+    .insert([formData])
+    .select();
+
+  if (error) {
+    console.error('Error:', error);
+  } else {
+    console.log('Created:', data);
+  }
+}
+\`\`\`
+
+**Authentication check:**
+\`\`\`tsx
+import { useAuth } from '@/hooks/useAuth';
+
+export function ProtectedPage() {
+  const { user, loading } = useAuth();
+
+  if (loading) return <div>Loading...</div>;
+  if (!user) return <div>Please log in</div>;
+
+  return <div>Welcome, {user.email}</div>;
+}
+\`\`\`
+`;
     }
 
     /**
      * Build context-aware prompt for task
      */
     private buildTaskPrompt(task: TaskDefinition, targetDir: string): string {
-        return `Working in project at ${targetDir}:
+        // Build rich context if we have spec and architecture
+        let contextSection = '';
+        if (this.buildState.spec && this.buildState.architecture) {
+            contextSection = this.buildTaskContext(this.buildState.spec, this.buildState.architecture) + '\n\n';
+        }
 
-Task: ${task.name}
-Agent: ${task.agent}
+        return `${contextSection}## Your Task
 
-Instructions:
+**Project Directory:** ${targetDir}
+**Task Name:** ${task.name}
+**Agent Type:** ${task.agent}
+
+**Instructions:**
 ${task.prompt}
 
-Files to create/modify:
+**Files to create/modify:**
 ${task.files?.join('\n') || 'As needed'}
 
-Verification:
-${task.verification}
+**Verification:**
+${task.verification || 'Ensure code compiles and follows project patterns'}
 
-Please implement this task now.`;
+---
+
+Please implement this task following the project patterns and type definitions above. Write clean, type-safe code that integrates seamlessly with the existing codebase.`;
     }
 
     /**
@@ -525,12 +591,32 @@ Please implement this task now.`;
     }
 
     /**
+     * Set webview panel for UI updates
+     */
+    setWebview(webview: vscode.WebviewPanel): void {
+        this.webview = webview;
+    }
+
+    /**
      * Set current phase and update UI
      */
     private setPhase(phase: BuildPhase, message: string): void {
         this.buildState.phase = phase;
         this.statusBarItem.text = `$(sync~spin) Liftoff: ${message}`;
         this.log(phase, message, 'started');
+        this.notifyPhaseUpdate(phase);
+    }
+
+    /**
+     * Notify webview of phase change
+     */
+    private notifyPhaseUpdate(phase: BuildPhase): void {
+        if (this.webview) {
+            this.webview.webview.postMessage({
+                type: 'phaseUpdate',
+                phase: phase
+            });
+        }
     }
 
     /**

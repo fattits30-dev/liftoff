@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import { HuggingFaceProvider, HFMessage } from './hfProvider';
+import { OllamaProvider, OllamaMessage } from './ollamaProvider';
 import { TOOLS, ToolResult, VSCODE_TOOLS, Tool } from './tools';
 import { BROWSER_TOOLS } from './tools/browser';
 import { GIT_TOOLS } from './tools/git';
@@ -7,7 +8,15 @@ import { LessonsManager } from './tools/lessons';
 import { Artifact } from './agentCommunication';
 import { getMcpRouter, McpRouter, disposeMcpRouter, disposeMcpOutputChannel } from './mcp';
 import { AgentMemory, SemanticMemoryStore } from './memory/agentMemory';
-import { DEFAULT_CLOUD_MODEL_NAME, LIMITS } from './config';
+import {
+    DEFAULT_CLOUD_MODEL_NAME,
+    DEFAULT_OLLAMA_MODEL_NAME,
+    DEFAULT_OLLAMA_AGENT_MODEL_NAME,
+    DEFAULT_PROVIDER,
+    API_ENDPOINTS,
+    LIMITS,
+    LLMProvider
+} from './config';
 import { buildAgentSystemPrompt } from './config/prompts';
 import { AgentType, AgentStatus } from './types/agentTypes';
 import { UnifiedAgentView } from './unifiedAgentView';
@@ -41,12 +50,13 @@ const AGENT_EMOJIS: Record<AgentType, string> = {
 };
 
 export class AutonomousAgentManager {
-    private hfProvider: HuggingFaceProvider | null = null;
+    private llmProvider: HuggingFaceProvider | OllamaProvider | null = null;
+    private providerType: LLMProvider = DEFAULT_PROVIDER;
     private mcpRouter: McpRouter | null = null;
     private mcpInitialized = false;
     private agents: Map<string, Agent> = new Map();
     private outputChannel: vscode.OutputChannel;
-    private defaultModel: string = DEFAULT_CLOUD_MODEL_NAME;
+    private defaultModel: string = DEFAULT_OLLAMA_MODEL_NAME; // Changed default to Ollama
     private lessons: LessonsManager;
     private pendingErrors: Map<string, { error: string; context: string; timestamp: number }> = new Map();
 
@@ -185,8 +195,29 @@ export class AutonomousAgentManager {
     }
 
     async setApiKey(apiKey: string): Promise<void> {
-        this.hfProvider = new HuggingFaceProvider(apiKey);
-        this.outputChannel.appendLine('[AgentManager] API key set');
+        // Get provider preference from settings
+        const config = vscode.workspace.getConfiguration('liftoff');
+        this.providerType = config.get<LLMProvider>('llmProvider', DEFAULT_PROVIDER);
+
+        if (this.providerType === 'ollama') {
+            // Use Ollama - no API key needed
+            const ollamaBaseUrl = config.get<string>('ollamaBaseUrl', API_ENDPOINTS.ollama);
+            // Agents use the dedicated agent model setting (can be local for speed)
+            const ollamaAgentModel = config.get<string>('ollamaAgentModel', 'deepseek-coder:6.7b');
+
+            this.llmProvider = new OllamaProvider(ollamaBaseUrl, ollamaAgentModel);
+            this.defaultModel = ollamaAgentModel;
+
+            const isLocal = !ollamaAgentModel.includes('cloud');
+            const emoji = isLocal ? '💻' : '☁️';
+            this.outputChannel.appendLine(`[AgentManager] ${emoji} Using Ollama at ${ollamaBaseUrl} with ${isLocal ? 'LOCAL' : 'CLOUD'} model ${ollamaAgentModel}`);
+        } else {
+            // Use HuggingFace cloud provider
+            this.llmProvider = new HuggingFaceProvider(apiKey);
+            this.defaultModel = DEFAULT_CLOUD_MODEL_NAME;
+            this.outputChannel.appendLine('[AgentManager] ☁️ Using HuggingFace cloud provider');
+        }
+
         await this.initMcpRouter();
     }
 
@@ -275,8 +306,8 @@ export class AutonomousAgentManager {
         }
         this.activeLoops.add(agentId);
 
-        if (!this.hfProvider) {
-            this.emit(agentId, '❌ API key not set', 'error');
+        if (!this.llmProvider) {
+            this.emit(agentId, '❌ LLM provider not configured', 'error');
             agent.status = 'error';
             this.activeLoops.delete(agentId);
             return;
@@ -301,10 +332,10 @@ export class AutonomousAgentManager {
                 this.emit(agentId, '\n\n💭 ', 'thought');
 
                 try {
-                    for await (const chunk of this.hfProvider.streamChat(
+                    for await (const chunk of this.llmProvider.streamChat(
                         agent.model,
                         agent.messages,
-                        { maxTokens: 2048, temperature: 0.2 }
+                        { maxTokens: 2048, temperature: 0.2, thinking: true }
                     )) {
                         if (agent.abortController?.signal.aborted) {
                             this.log(agent, 'Aborted during streaming');
@@ -688,8 +719,16 @@ export class AutonomousAgentManager {
     }
 
     public async testConnection(): Promise<boolean> {
-        if (!this.hfProvider) return false;
-        return this.hfProvider.testConnection(this.defaultModel);
+        if (!this.llmProvider) return false;
+
+        if (this.providerType === 'ollama') {
+            // For Ollama, use healthCheck
+            return await (this.llmProvider as OllamaProvider).healthCheck();
+        } else {
+            // For HuggingFace, use testConnection if it exists
+            const hfProvider = this.llmProvider as HuggingFaceProvider;
+            return hfProvider.testConnection ? await hfProvider.testConnection(this.defaultModel) : true;
+        }
     }
 
     public on(event: string, cb: (...args: any[]) => void): vscode.Disposable {

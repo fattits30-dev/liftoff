@@ -83,13 +83,18 @@ export interface AppSpec {
     // UI structure
     pages: PageRoute[];
     
-    // Tech choices (with sensible defaults)
+    // Tech stack (AI-researched and decided)
     stack: {
-        frontend: 'react' | 'nextjs';
-        styling: 'tailwind';
-        components: 'shadcn';
-        backend: 'supabase';
-        hosting: 'vercel' | 'netlify';
+        frontend: string;      // e.g., 'react', 'vue', 'svelte', 'nextjs', 'solid'
+        bundler?: string;      // e.g., 'vite', 'webpack', 'parcel', 'turbopack'
+        styling: string;       // e.g., 'tailwind', 'styled-components', 'css-modules'
+        components?: string;   // e.g., 'shadcn', 'mantine', 'chakra', 'mui'
+        backend: string;       // e.g., 'supabase', 'firebase', 'express', 'fastify'
+        database?: string;     // e.g., 'postgres', 'mongodb', 'sqlite', 'planetscale'
+        auth?: string;         // e.g., 'supabase-auth', 'clerk', 'auth0', 'nextauth'
+        hosting?: string;      // e.g., 'vercel', 'netlify', 'cloudflare', 'railway'
+        realtime?: string;     // e.g., 'supabase-realtime', 'pusher', 'socket.io'
+        rationale?: string;    // Why this stack was chosen
     };
     
     // Supabase project info (filled after setup)
