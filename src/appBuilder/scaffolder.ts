@@ -46,10 +46,23 @@ export class Scaffolder {
         this.log(`Scaffolding project: ${spec.name} at ${targetDir}`);
 
         try {
-            // 1. Create target directory
+            // 1. Validate paths (but DON'T create target dir - CLI will do that)
             validatePath(targetDir, this.workspaceRoot);
-            if (!fs.existsSync(targetDir)) {
-                fs.mkdirSync(targetDir, { recursive: true });
+
+            // Ensure parent directory exists
+            const parentDir = path.dirname(targetDir);
+            if (!fs.existsSync(parentDir)) {
+                fs.mkdirSync(parentDir, { recursive: true });
+            }
+
+            // Check target directory doesn't already exist
+            if (fs.existsSync(targetDir)) {
+                throw new ValidationError(
+                    `Target directory already exists: ${targetDir}`,
+                    'path',
+                    'empty directory',
+                    'existing directory'
+                );
             }
 
             // THREE-TIER HYBRID APPROACH:
